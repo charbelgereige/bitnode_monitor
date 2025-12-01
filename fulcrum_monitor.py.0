@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""
+Lightweight Fulcrum/bitcoind monitor for Raspberry Pi.
+
+Features:
+- Reads config from local.env in same directory
+- Tracks:
+    - bitcoind chain height
+    - Fulcrum "Processed height"
+    - Lag, average speed, std-dev, ETA
+- Monitors:
+    - CPU %
+    - RAM %
+    - SSD temperature (if accessible)
+- Automatic stall recovery:
+    - If Fulcrum height doesn't move for > STALL_THRESHOLD, restart fulcrum service
+- Optionally writes PNG charts (speed & system stats)
+- Console + log file output (no Telegram required)
+"""
+
+import os
+import time
+import subprocess
+import re
+import statistics
+import datetime
+from pathlib import Path
+
+import psutil
+from dotenv import load_dotenv
+
+import matplotlib
+matplotlib.use("Agg")  # no GUI
+import matplotlib.pyplot as plt
+import requests
+
+# ---------------------------------------------------------------------
+# Paths & config loading
+# ---------------------------------------------------------------------
+
+BASE_DIR = Path(__file__).resolve().parent
+ENV_FILE = BASE_DIR / "local.env"
+LOG_FILE = BASE_DIR / "monitor.log"
+SPEED_CHART_FILE = BASE_DIR / "speed_chart.png"
+SYSTEM_CHART_FILE = BASE_DIR / "system_chart.png"
+
+if ENV_FILE.exists():
+    load_dotenv(ENV_FILE)
+else:
+    print(f"[WARN] {ENV_FILE} not found. Using defaults + hard-coded paths.")
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+ENABLE_TELEGRAM = os.getenv("ENABLE_TELEGRAM", "0") == "1"
+
+
+def parse_duration(value, default_seconds):
+    """
+    Parse strings like '30', '30s', '5m', '2h' into seconds.
+    """
+    if not value:
+        return default_seconds
+    s = value.strip().lower()
+    if s.endswith("s"):
+        try:
+            return int(s[:-1])
+        except ValueError:
+            return default_seconds
+    if s.endswith("m"):
+        try:
+            return int(s[:-1]) * 60
+        except ValueError:
+            return default_seconds
+    if s.endswith("h"):
+        try:
+            return int(s[:-1]) * 3600
+        except ValueError:
+            return default_seconds
+    try:
+        return int(s)
+    except ValueError:
+        return default_seconds
+
+
+BITCOIN_CONF = os.getenv("BITCOIN_CONF", "/mnt/bitcoin/bitcoind/bitcoin.conf")
+FULCRUM_SERVICE = os.getenv("FULCRUM_SERVICE", "fulcrum")
+BITCOIND_SERVICE = os.getenv("BITCOIND_SERVICE", "bitcoind")
+
+CHECK_INTERVAL = parse_duration(os.getenv("CHECK_INTERVAL", "120"), 120)
+STALL_THRESHOLD = parse_duration(os.getenv("STALL_THRESHOLD", "1800"), 1800)  # 30m
+SPEED_WINDOW = int(os.getenv("SPEED_WINDOW", "50"))
+
+SSD_TEMP_THRESHOLD = float(os.getenv("SSD_TEMP_THRESHOLD", "65"))
+CPU_ALERT_THRESHOLD = float(os.getenv("CPU_ALERT_THRESHOLD", "90"))
+RAM_ALERT_THRESHOLD = float(os.getenv("RAM_ALERT_THRESHOLD", "90"))
+
+CHART_INTERVAL = parse_duration(os.getenv("CHART_INTERVAL", "3600"), 3600)  # 1h
+
+
+# ---------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------
+
+def log(msg: str):
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line)
+    try:
+        with LOG_FILE.open("a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------
+# Helper functions to query system state
+# ---------------------------------------------------------------------
+
+def get_bitcoind_height():
+    try:
+        out = subprocess.check_output(
+            [
+                "sudo", "-u", "bitcoin",
+                "/usr/local/bin/bitcoin-cli",
+                f"-conf={BITCOIN_CONF}",
+                "getblockcount",
+            ],
+            stderr=subprocess.DEVNULL,
+        )
+        return int(out.strip())
+    except Exception as e:
+        log(f"[ERR] get_bitcoind_height failed: {e}")
+        return None
+
+
+def get_fulcrum_height():
+    """
+    Parse last 'Processed height: XXXX' from fulcrum journald logs.
+    """
+    try:
+        out = subprocess.check_output(
+            ["sudo", "journalctl", "-u", FULCRUM_SERVICE, "--no-pager"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+        matches = re.findall(r"Processed height:\s*([0-9]+)", out)
+        if matches:
+            return int(matches[-1])
+        return None
+    except Exception as e:
+        log(f"[ERR] get_fulcrum_height failed: {e}")
+        return None
+
+
+def get_ssd_temp():
+    """
+    Try to get SSD/drive temperature.
+
+    Strategy:
+      1. smartctl -A /dev/sda  (if smartctl installed & drive supports it)
+      2. /sys/class/hwmon/*/temp*_input
+    """
+    # smartctl
+    try:
+        out = subprocess.check_output(
+            ["sudo", "smartctl", "-A", "/dev/sda"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+        for line in out.splitlines():
+            if "Temperature" in line or "Temp" in line:
+                parts = line.split()
+                # try to find an int in that line
+                for p in parts:
+                    if p.isdigit():
+                        return float(p)
+    except Exception:
+        pass
+
+    # /sys/class/hwmon fallback
+    hwmon_dir = Path("/sys/class/hwmon")
+    if hwmon_dir.exists():
+        for hw in hwmon_dir.iterdir():
+            for tfile in hw.glob("temp*_input"):
+                try:
+                    raw = tfile.read_text().strip()
+                    val = float(raw) / 1000.0  # usually in millidegC
+                    return val
+                except Exception:
+                    continue
+    return None
+
+
+# ---------------------------------------------------------------------
+# Speed tracking & ETA
+# ---------------------------------------------------------------------
+
+class SpeedTracker:
+    def __init__(self, window=50):
+        self.window = window
+        self.samples = []   # blocks/sec
+        self.timestamps = []
+        self.heights = []
+        self.last_height = None
+        self.last_time = None
+
+    def update(self, height: int):
+        now = time.time()
+        if self.last_height is not None and height is not None:
+            dh = height - self.last_height
+            dt = now - self.last_time if self.last_time is not None else 0
+            if dt > 0 and dh >= 0:
+                speed = dh / dt
+                self.samples.append(speed)
+                self.timestamps.append(now)
+                self.heights.append(height)
+                if len(self.samples) > self.window:
+                    self.samples = self.samples[-self.window:]
+                    self.timestamps = self.timestamps[-self.window:]
+                    self.heights = self.heights[-self.window:]
+        self.last_height = height
+        self.last_time = now
+
+    def get_stats(self):
+        """
+        Returns (EMA speed, std-dev) or (None, None) if no data.
+        """
+        if not self.samples:
+            return None, None
+        # EMA smoothing
+        alpha = 0.2
+        ema = self.samples[0]
+        for s in self.samples[1:]:
+            ema = alpha * s + (1 - alpha) * ema
+        stdev = statistics.pstdev(self.samples) if len(self.samples) > 1 else 0.0
+        return ema, stdev
+
+
+speed_tracker = SpeedTracker(window=SPEED_WINDOW)
+
+
+# ---------------------------------------------------------------------
+# Charts
+# ---------------------------------------------------------------------
+
+def write_speed_chart():
+    """
+    Save speed chart to SPEED_CHART_FILE if we have enough samples.
+    """
+    if len(speed_tracker.samples) < 2:
+        return
+    try:
+        plt.figure(figsize=(10, 4))
+        plt.plot(speed_tracker.samples, marker="o", linestyle="-")
+        plt.title("Fulcrum Indexing Speed (blocks/sec)")
+        plt.xlabel("Sample index (last N checks)")
+        plt.ylabel("blocks/sec")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(SPEED_CHART_FILE)
+        plt.close()
+        log(f"[CHART] Wrote speed chart to {SPEED_CHART_FILE}")
+    except Exception as e:
+        log(f"[ERR] Failed to write speed chart: {e}")
+
+
+def write_system_chart(cpu_pct, ram_pct, ssd_temp):
+    """
+    Save basic system chart (CPU/RAM/SSD temp) to SYSTEM_CHART_FILE.
+    """
+    try:
+        labels = ["CPU %", "RAM %"]
+        values = [cpu_pct, ram_pct]
+        if ssd_temp is not None:
+            labels.append("SSD °C")
+            values.append(ssd_temp)
+
+        plt.figure(figsize=(6, 4))
+        plt.bar(labels, values)
+        plt.ylim(0, max(values) + 10)
+        plt.title("System Telemetry")
+        plt.grid(axis="y")
+        plt.tight_layout()
+        plt.savefig(SYSTEM_CHART_FILE)
+        plt.close()
+        log(f"[CHART] Wrote system chart to {SYSTEM_CHART_FILE}")
+    except Exception as e:
+        log(f"[ERR] Failed to write system chart: {e}")
+
+
+# ---------------------------------------------------------------------
+# Stall recovery
+# ---------------------------------------------------------------------
+
+def restart_fulcrum():
+    try:
+        log("[RECOVERY] Restarting fulcrum via systemctl...")
+        subprocess.check_call(["sudo", "systemctl", "restart", FULCRUM_SERVICE])
+        log("[RECOVERY] fulcrum restart triggered.")
+    except Exception as e:
+        log(f"[ERR] Failed to restart fulcrum: {e}")
+
+
+# ---------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------
+
+def main():
+    log("========== Fulcrum monitor starting ==========")
+    log(f"BITCOIN_CONF={BITCOIN_CONF}")
+    log(f"CHECK_INTERVAL={CHECK_INTERVAL}s, STALL_THRESHOLD={STALL_THRESHOLD}s")
+    log(f"SSD_TEMP_THRESHOLD={SSD_TEMP_THRESHOLD}°C, CPU_ALERT={CPU_ALERT_THRESHOLD}%, RAM_ALERT={RAM_ALERT_THRESHOLD}%")
+    log(f"Charts every {CHART_INTERVAL}s (approx).")
+
+    last_height_change_time = None
+    last_fulcrum_height = None
+    last_chart_time = 0
+    last_recovery_time = 0
+    MIN_RECOVERY_INTERVAL = 600  # avoid restart flapping, 10min
+
+    while True:
+        loop_start = time.time()
+
+        btc_height = get_bitcoind_height()
+        ful_height = get_fulcrum_height()
+
+        if btc_height is None or ful_height is None:
+            log("[WARN] Could not read heights (bitcoind or fulcrum).")
+        else:
+            # speed tracking
+            speed_tracker.update(ful_height)
+            ema_speed, stdev = speed_tracker.get_stats()
+
+            lag = btc_height - ful_height
+            # ETA
+            eta_str = "N/A"
+            if ema_speed and ema_speed > 0:
+                eta_sec = lag / ema_speed
+                eta_hours = eta_sec / 3600.0
+                eta_str = f"{eta_hours:.2f} h"
+
+            log(
+                f"Heights: bitcoind={btc_height}, fulcrum={ful_height}, "
+                f"lag={lag} blocks, speed~={ema_speed:.3f} blk/s (σ={stdev:.3f}), ETA={eta_str}"
+            )
+
+            # stall detection
+            if last_fulcrum_height is None or ful_height != last_fulcrum_height:
+                last_height_change_time = loop_start
+                last_fulcrum_height = ful_height
+            else:
+                if last_height_change_time is not None:
+                    stalled_for = loop_start - last_height_change_time
+                    if stalled_for > STALL_THRESHOLD:
+                        if loop_start - last_recovery_time > MIN_RECOVERY_INTERVAL:
+                            log(f"[STALL] Fulcrum height unchanged for {stalled_for:.0f}s (> {STALL_THRESHOLD}s).")
+                            restart_fulcrum()
+                            last_recovery_time = loop_start
+                        else:
+                            log("[STALL] Stall detected but recovery recently done; skipping restart.")
+
+        # system stats
+        try:
+            cpu_pct = psutil.cpu_percent(interval=1)
+            ram_pct = psutil.virtual_memory().percent
+        except Exception as e:
+            log(f"[ERR] psutil error: {e}")
+            cpu_pct = None
+            ram_pct = None
+
+        ssd_temp = get_ssd_temp()
+
+        if cpu_pct is not None and cpu_pct > CPU_ALERT_THRESHOLD:
+            log(f"[ALERT] CPU high load: {cpu_pct:.1f}%")
+
+        if ram_pct is not None and ram_pct > RAM_ALERT_THRESHOLD:
+            log(f"[ALERT] RAM high usage: {ram_pct:.1f}%")
+
+        if ssd_temp is not None and ssd_temp > SSD_TEMP_THRESHOLD:
+            log(f"[ALERT] SSD temperature high: {ssd_temp:.1f}°C")
+
+        # charts occasionally
+        now = time.time()
+        if now - last_chart_time > CHART_INTERVAL:
+            if speed_tracker.samples:
+                write_speed_chart()
+            if cpu_pct is not None and ram_pct is not None:
+                write_system_chart(cpu_pct, ram_pct, ssd_temp)
+            last_chart_time = now
+
+        # sleep until next interval
+        elapsed = time.time() - loop_start
+        remaining = CHECK_INTERVAL - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        log("Monitor interrupted by user, exiting.")

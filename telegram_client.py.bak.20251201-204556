@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import requests
+
+
+class TelegramClient:
+    def __init__(self, token, chat_id, logger=None):
+        """
+        Simple Telegram client:
+        - token: bot token
+        - chat_id: chat ID to send messages to
+        - logger: optional Logger instance (from logger_util)
+        """
+        self.token = token
+        self.chat_id = str(chat_id) if chat_id is not None else None
+        self.logger = logger
+        self.base_url = f"https://api.telegram.org/bot{token}" if token else None
+        self.last_update_id = None
+
+    def enabled(self):
+        return bool(self.token and self.chat_id and self.base_url)
+
+    def _log_err(self, msg):
+        if self.logger:
+            self.logger.log(f"[ERR] Telegram: {msg}")
+        else:
+            print(f"[ERR] Telegram: {msg}")
+
+    def send_text(self, text):
+        if not self.enabled():
+            return
+        try:
+            requests.post(
+                f"{self.base_url}/sendMessage",
+                data={"chat_id": self.chat_id, "text": text},
+                timeout=5,
+            )
+        except Exception as e:
+            self._log_err(f"send_text failed: {e}")
+
+    def send_photo(self, path: Path, caption: str = ""):
+        """
+        Optional helper to send a PNG chart (or any image file).
+        """
+        if not self.enabled():
+            return
+        try:
+            url = f"{self.base_url}/sendPhoto"
+            with open(path, "rb") as f:
+                files = {"photo": f}
+                data = {"chat_id": self.chat_id, "caption": caption}
+                requests.post(url, data=data, files=files, timeout=10)
+        except Exception as e:
+            self._log_err(f"send_photo failed: {e}")
+
+    def poll_commands(self):
+        """
+        Poll Telegram getUpdates and return a list of commands (strings beginning with '/').
+        Only messages from the configured chat_id are considered.
+        """
+        if not self.enabled():
+            return []
+
+        params = {"timeout": 0}
+        if self.last_update_id is not None:
+            params["offset"] = self.last_update_id + 1
+
+        try:
+            r = requests.get(f"{self.base_url}/getUpdates", params=params, timeout=5)
+            data = r.json()
+        except Exception as e:
+            self._log_err(f"getUpdates failed: {e}")
+            return []
+
+        results = data.get("result", [])
+        commands = []
+
+        for upd in results:
+            self.last_update_id = upd.get("update_id", self.last_update_id)
+
+            msg = upd.get("message") or upd.get("edited_message")
+            if not msg:
+                continue
+
+            chat_id = msg.get("chat", {}).get("id")
+            if chat_id is None or str(chat_id) != self.chat_id:
+                # Ignore other chats
+                continue
+
+            text = msg.get("text") or ""
+            text = text.strip()
+            if text.startswith("/"):
+                cmd = text.split()[0]  # '/status foo' -> '/status'
+                commands.append(cmd)
+
+        return commands

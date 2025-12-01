@@ -1,0 +1,84 @@
+########################################
+# Python
+########################################
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+########################################
+# Environment / secrets
+########################################
+.env
+*.env
+local.env
+secrets/
+credentials/
+token.txt
+
+########################################
+# Logs & runtime output
+########################################
+*.log
+logs/
+*.out
+*.err
+
+# Charts/plots
+*.png
+*.svg
+*.jpg
+
+########################################
+# System-specific / editor cruft
+########################################
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+########################################
+# Systemd service files (optional)
+########################################
+*.service
+*.timer
+
+########################################
+# Cache / state
+########################################
+.cache/
+*.lock
+*.pid
+
+########################################
+# Backup files
+########################################
+*.bak
+*.tmp
+*.old
+
+########################################
+# Project-specific excludes
+########################################
+# Avoid committing Fulcrum DB or indexes accidentally
+fulcrum-db/
+db/
+index/
+
+# Ignore compiled charts and artifacts
+system_chart.png

@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+from system_info import get_bitcoind_height, get_fulcrum_height, get_system_stats, get_ssd_temp
+
+
+def build_status_text(bitcoin_conf, fulcrum_service, speed_tracker, logger):
+    btc = get_bitcoind_height(bitcoin_conf, logger)
+    ful = get_fulcrum_height(fulcrum_service, logger)
+    cpu_pct, ram_pct = get_system_stats(logger)
+    ssd_temp = get_ssd_temp(logger)
+
+    if btc is None or ful is None:
+        height_line = "Heights: bitcoind or fulcrum unavailable."
+        lag_line = ""
+    else:
+        lag = btc - ful
+        ema, stdev = speed_tracker.get_stats()
+        if ema and ema > 0:
+            eta_hours = (lag / ema) / 3600.0
+            eta_str = f"{eta_hours:.2f} h"
+        else:
+            eta_str = "N/A"
+        height_line = f"Heights: bitcoind={btc}, fulcrum={ful}, lag={lag} blocks"
+        speed_str = f"{ema:.3f}" if ema is not None else "N/A"
+        stdev_str = f"{stdev:.3f}" if stdev is not None else "N/A"
+        lag_line = f"Speed≈{speed_str} blk/s (σ={stdev_str}), ETA={eta_str}"
+
+    if cpu_pct is None or ram_pct is None:
+        sys_line = "System: CPU/RAM unavailable"
+    else:
+        sys_line = f"System: CPU={cpu_pct:.1f}%, RAM={ram_pct:.1f}%"
+    if ssd_temp is not None:
+        sys_line += f", SSD={ssd_temp:.1f}°C"
+
+    return "\n".join(filter(None, [height_line, lag_line, sys_line))

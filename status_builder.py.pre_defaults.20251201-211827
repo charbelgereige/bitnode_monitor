@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""
+Helpers to build human-readable status text for logs and Telegram.
+"""
+
+from typing import Optional
+
+
+def _fmt_height_line(
+    btc_height: Optional[int],
+    ful_height: Optional[int],
+    lag: Optional[int],
+) -> str:
+    if btc_height is None or ful_height is None or lag is None:
+        return "Heights: (unavailable)"
+    return f"Heights: bitcoind={btc_height}, fulcrum={ful_height}, lag={lag} blocks"
+
+
+def _fmt_speed_line(
+    ema_speed: Optional[float],
+    stdev: Optional[float],
+    eta_hours: Optional[float],
+) -> str:
+    if ema_speed is None:
+        speed_str = "N/A"
+    else:
+        speed_str = f"{ema_speed:.3f}"
+
+    if stdev is None:
+        stdev_str = "N/A"
+    else:
+        stdev_str = f"{stdev:.3f}"
+
+    if eta_hours is None:
+        eta_str = "N/A"
+    else:
+        eta_str = f"{eta_hours:.2f} h"
+
+    return f"Speed: ~{speed_str} blk/s (σ={stdev_str}), ETA={eta_str}"
+
+
+def _fmt_system_line(
+    cpu_pct: Optional[float],
+    ram_pct: Optional[float],
+    ssd_temp: Optional[float],
+    btc_ok: Optional[bool],
+    ful_ok: Optional[bool],
+) -> str:
+    parts = []
+
+    if cpu_pct is not None:
+        parts.append(f"CPU={cpu_pct:.1f}%")
+    else:
+        parts.append("CPU=N/A")
+
+    if ram_pct is not None:
+        parts.append(f"RAM={ram_pct:.1f}%")
+    else:
+        parts.append("RAM=N/A")
+
+    if ssd_temp is not None:
+        parts.append(f"SSD={ssd_temp:.1f}°C")
+    else:
+        parts.append("SSD=N/A")
+
+    if btc_ok is not None:
+        parts.append(f"bitcoind={'OK' if btc_ok else 'ISSUE'}")
+
+    if ful_ok is not None:
+        parts.append(f"fulcrum={'OK' if ful_ok else 'ISSUE'}")
+
+    return " | ".join(parts)
+
+
+def build_status_text(
+    btc_height: Optional[int],
+    ful_height: Optional[int],
+    lag: Optional[int],
+    ema_speed: Optional[float],
+    stdev: Optional[float],
+    eta_hours: Optional[float],
+    cpu_pct: Optional[float],
+    ram_pct: Optional[float],
+    ssd_temp: Optional[float],
+    btc_ok: Optional[bool],
+    ful_ok: Optional[bool],
+) -> str:
+    """
+    Build a multi-line status summary suitable for logs and Telegram.
+    """
+    height_line = _fmt_height_line(btc_height, ful_height, lag)
+    speed_line = _fmt_speed_line(ema_speed, stdev, eta_hours)
+    sys_line = _fmt_system_line(cpu_pct, ram_pct, ssd_temp, btc_ok, ful_ok)
+
+    return "\n".join(filter(None, [height_line, speed_line, sys_line]))
