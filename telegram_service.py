@@ -28,7 +28,7 @@ class TelegramService:
         self.client = TelegramClient(self.bot_token, self.chat_id, self.logger)
         self.logger.log("[TG] Telegram client initialized.")
         try:
-            self.client.send_text("🚀 Fulcrum monitor Telegram loop started.")
+            self.client.send_text("🚀 Bitnode monitor Telegram loop started. Type /help for commands.")
         except Exception:
             pass
         t = threading.Thread(target=self._loop, daemon=True)
