@@ -71,6 +71,8 @@ Thumbs.db
 *.bak
 *.tmp
 *.old
+*backup*
+*bak*
 
 ########################################
 # Project-specific excludes
