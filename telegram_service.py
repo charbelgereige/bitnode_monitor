@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 from telegram_client import TelegramClient
+from speed_history import load_samples_since_restart, build_speed_report
 
 
 class TelegramService:
@@ -11,6 +12,7 @@ class TelegramService:
     Background Telegram listener:
       - understands natural-language-ish commands
       - calls callbacks provided by MonitorController
+      - can show speed/ETA history since last fulcrum restart
     """
     def __init__(self, bot_token, chat_id, logger, speed_chart_file: Path, system_chart_file: Path, callbacks):
         self.logger = logger
@@ -20,6 +22,8 @@ class TelegramService:
         self.client = None
         self.bot_token = bot_token
         self.chat_id = chat_id
+        # derive monitor.log from chart location
+        self.log_file = speed_chart_file.with_name("monitor.log")
 
     def start(self):
         if not self.bot_token or not self.chat_id:
@@ -28,7 +32,12 @@ class TelegramService:
         self.client = TelegramClient(self.bot_token, self.chat_id, self.logger)
         self.logger.log("[TG] Telegram client initialized.")
         try:
-            self.client.send_text("🚀 Bitnode monitor Telegram loop started. Type /help for commands.")
+            self.client.send_text(
+                "🚀 Bitnode monitor Telegram loop started.\n"
+                "Short description: watchdog for your Raspberry Pi Bitcoin/Fulcrum stack "
+                "(heights, lag, ETA, CPU/RAM, charts).\n"
+                "Type /help for commands."
+            )
         except Exception:
             pass
         t = threading.Thread(target=self._loop, daemon=True)
@@ -52,26 +61,69 @@ class TelegramService:
                     text = msg.get("text")
                     if not text:
                         continue
+                    # log incoming text
+                    self.logger.log(f"[TG] ← {text}")
                     self._handle_text(text)
             except Exception as e:
                 self.logger.log(f"[ERR] Telegram loop error: {e}")
                 time.sleep(5)
+
+    # ----------------------------------------------------------
+    # Command routing
+    # ----------------------------------------------------------
 
     def _handle_text(self, text: str):
         t = text.strip()
         tl = t.lower()
 
         # Status / lag
-        if t.startswith("/status") or "status" in tl or "state" in tl or "how far" in tl:
+        if t.startswith("/status") or " status" in tl or "state" in tl or "how far" in tl:
             fn = self.callbacks.get("status_text")
             if fn:
                 self.client.send_text("📊 Status:\n" + fn())
             return
 
-        if t.startswith("/heights") or t.startswith("/lag") or "lag" in tl:
+        if t.startswith("/heights") or t.startswith("/lag") or " lag" in tl:
             fn = self.callbacks.get("status_text")
             if fn:
                 self.client.send_text("📏 Heights/lag:\n" + fn())
+            return
+
+        # Speeds / ETA history
+        if t.startswith("/speeds") or "speeds" in tl:
+            mode = "full"
+            n = None
+
+            tokens = t.split()
+            i = 1
+            while i < len(tokens):
+                tok = tokens[i]
+                if tok in ("-h", "--head"):
+                    mode = "head"
+                    if i + 1 < len(tokens):
+                        try:
+                            n = int(tokens[i + 1])
+                            i += 1
+                        except ValueError:
+                            pass
+                elif tok in ("-t", "--tail"):
+                    mode = "tail"
+                    if i + 1 < len(tokens):
+                        try:
+                            n = int(tokens[i + 1])
+                            i += 1
+                        except ValueError:
+                            pass
+                i += 1
+
+            samples = load_samples_since_restart(self.log_file)
+            if not samples:
+                self.client.send_text("No Heights samples found in monitor.log for this Fulcrum run yet.")
+                return
+
+            summary, lines = build_speed_report(samples, mode=mode, n=n)
+            msg = "📈 Fulcrum speed/ETA history (current run):\n" + summary + "\n\n" + "\n".join(lines)
+            self.client.send_text(msg)
             return
 
         # Charts
@@ -104,7 +156,7 @@ class TelegramService:
             return
 
         # Check RPC
-        if t.startswith("/check") or "check rpc" in tl or "rpc" in tl:
+        if t.startswith("/check") or "check rpc" in tl or " rpc" in tl:
             fn = self.callbacks.get("check_rpc")
             if fn:
                 msg = fn()
@@ -114,10 +166,11 @@ class TelegramService:
         # Fallback help
         self.client.send_text(
             "🤖 Commands I understand:\n"
-            "- /status, 'status', 'how far behind' → heights, lag, ETA, CPU/RAM\n"
-            "- /heights, /lag → heights + lag only\n"
-            "- /chart, 'charts', 'graph' → send latest charts\n"
-            "- /restart fulcrum → restart Fulcrum\n"
-            "- /restart bitcoind → restart bitcoind\n"
-            "- /check rpc, 'check rpc' → test bitcoind RPC responsiveness\n"
+            "- /status – heights, lag, ETA, CPU/RAM\n"
+            "- /heights – block heights only\n"
+            "- /speeds [-h N | -t N] – speed/ETA history since last Fulcrum restart\n"
+            "- /chart – send speed/system charts\n"
+            "- /restart fulcrum\n"
+            "- /restart bitcoind\n"
+            "- /check rpc\n"
         )
