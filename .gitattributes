@@ -1,0 +1,5 @@
+# Enforce LF in text files (prevents CRLF churn)
+*.gitignore text eol=lf
+*.py       text eol=lf
+*.md       text eol=lf
+*.txt      text eol=lf
