@@ -34,8 +34,8 @@ class TelegramService:
         try:
             self.client.send_text(
                 "🚀 Bitnode monitor Telegram loop started.\n"
-                "Short description: watchdog for your Raspberry Pi Bitcoin/Fulcrum stack "
-                "(heights, lag, ETA, CPU/RAM, charts).\n"
+                "Watchdog for Bitcoin/Fulcrum/Datum stack: heights, lag, ETA, speed, "
+                "CPU/RAM/SSD/disk, system alerts, and charts.\n"
                 "Type /help for commands."
             )
         except Exception:
