@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import subprocess
+import json
 from pathlib import Path
 
 import psutil
@@ -113,3 +114,42 @@ def get_system_stats(logger):
     except Exception as e:
         logger.log(f"[ERR] psutil error: {e}")
         return None, None
+
+
+def get_bitcoind_state(bitcoin_conf: str, logger):
+    """
+    Return dict with bitcoind sync/verification state.
+    Keys:
+      ok(bool), blocks(int|None), headers(int|None),
+      ibd(bool|None), verificationprogress(float|None), warnings(str|None)
+    """
+    try:
+        out = subprocess.check_output(
+            [
+                "sudo", "-u", "bitcoin",
+                "/usr/local/bin/bitcoin-cli",
+                f"-conf={bitcoin_conf}",
+                "getblockchaininfo",
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        j = json.loads(out.decode("utf-8", errors="replace"))
+        return {
+            "ok": True,
+            "blocks": int(j.get("blocks")) if j.get("blocks") is not None else None,
+            "headers": int(j.get("headers")) if j.get("headers") is not None else None,
+            "ibd": bool(j.get("initialblockdownload")) if j.get("initialblockdownload") is not None else None,
+            "verificationprogress": float(j.get("verificationprogress")) if j.get("verificationprogress") is not None else None,
+            "warnings": j.get("warnings"),
+        }
+    except Exception as e:
+        logger.log(f"[ERR] get_bitcoind_state failed: {e}")
+        return {
+            "ok": False,
+            "blocks": None,
+            "headers": None,
+            "ibd": None,
+            "verificationprogress": None,
+            "warnings": None,
+        }

@@ -32,6 +32,8 @@ class MonitorController:
         self.bitcoin_conf = os.getenv("BITCOIN_CONF", "/mnt/bitcoin/bitcoind/bitcoin.conf")
         self.fulcrum_service = os.getenv("FULCRUM_SERVICE", "fulcrum")
         self.bitcoind_service = os.getenv("BITCOIND_SERVICE", "bitcoind")
+        self.datum_service = os.getenv("DATUM_SERVICE", "datum-gateway")
+        self.datum_cooldown_sec = int(os.getenv("DATUM_COOLDOWN_SEC", "900"))  # 15 min
 
         self.check_interval = parse_duration(os.getenv("CHECK_INTERVAL", "120"), 120)
         self.stall_threshold = parse_duration(os.getenv("STALL_THRESHOLD", "1800"), 1800)
@@ -106,6 +108,25 @@ class MonitorController:
         if h is None:
             return "❌ bitcoind RPC failed."
         return f"✅ bitcoind RPC ok. Height={h}, latency={elapsed:.2f}s"
+
+    
+    def check_datum_service(self):
+        # Minimal: alert if datum-gateway is not active (cooldown)
+        import subprocess, time
+        now = time.time()
+        last = getattr(self, "_datum_last_alert_ts", 0)
+        try:
+            r = subprocess.run(["/bin/systemctl", "is-active", self.datum_service], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
+            active = (r.returncode == 0 and r.stdout.strip() == "active")
+        except Exception:
+            active = False
+        if not active and (now - last) >= self.datum_cooldown_sec:
+            self._datum_last_alert_ts = now
+            host = os.uname().nodename
+            txt = "[{0}] ⚠️ DATUM not active. Run: systemctl status {1} -l; journalctl -u {1} -n 80 --no-pager".format(host, self.datum_service)
+            self.logger.log(txt)
+            if self.telegram_service and self.telegram_service.client:
+                self.telegram_service.client.send_text(txt)
 
     # ----- Telegram startup -----
 
@@ -208,6 +229,9 @@ class MonitorController:
                                     self.last_recovery_time = now
 
                             self.stall_notified = True
+
+            # Datum (minimal)
+            self.check_datum_service()
 
             # System stats
             cpu_pct, ram_pct = get_system_stats(self.logger)
