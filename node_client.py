@@ -32,14 +32,14 @@ class NodeClient:
 
     def get_fulcrum_height(self) -> Optional[int]:
         """
-        Parse last 'Processed height: XXXX' from fulcrum journald logs.
+        Parse last 'Block height XXXX' from fulcrum journald logs.
         """
         try:
             out = subprocess.check_output(
                 ["sudo", "journalctl", "-u", self.config.fulcrum_service, "--no-pager"],
                 stderr=subprocess.DEVNULL,
             ).decode()
-            matches = re.findall(r"Processed height:\s*([0-9]+)", out)
+            matches = re.findall(r"Block height\s*([0-9]+)", out)
             if matches:
                 return int(matches[-1])
             return None
