@@ -84,3 +84,13 @@ index/
 
 # Ignore compiled charts and artifacts
 system_chart.png
+# Local backup / scratch files
+*.bak.*
+*.before-*
+*.before_*
+*.broken.*
+*.pre_*
+*.pre-*
+*.class_*
+*.identation
+*.0
