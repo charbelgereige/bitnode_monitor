@@ -92,3 +92,11 @@ system_chart.png
 *.class_*
 *.identation
 *.0
+
+# --- local backups / ad-hoc snapshots (do not commit) ---
+*.backup
+*.backup.*
+*.bak
+*.bak.*
+*.orig
+*~
