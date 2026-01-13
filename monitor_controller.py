@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 import time
 import os
+import threading
+import subprocess
+import re
 from pathlib import Path
+
 
 from logger_util import Logger
 from speed_tracker import SpeedTracker
@@ -16,6 +20,48 @@ from charts import write_speed_chart, write_system_chart
 from service_control import restart_fulcrum, restart_bitcoind
 from status_builder import build_status_text
 from telegram_service import TelegramService
+from bitaxe_checker import BitaxeChecker
+
+
+def _run(cmd, timeout=6):
+    """
+    Run a command and return (rc, stdout, stderr). Never raises.
+    """
+    try:
+        r = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+        return r.returncode, (r.stdout or ""), (r.stderr or "")
+    except Exception as e:
+        return 124, "", f"{type(e).__name__}: {e}"
+
+
+def _truncate(s: str, max_chars: int = 3300) -> str:
+    """
+    Telegram-safe truncation. Keep head, append marker if needed.
+    """
+    if s is None:
+        return ""
+    if len(s) <= max_chars:
+        return s
+    return s[: max(0, max_chars - 40)] + "\n...[truncated]\n"
+
+
+def _token_counts(text: str):
+    """
+    Quick token frequency for debugging signal.
+    """
+    rx = re.compile(
+        r"(error|warn|fail|timeout|disconnect|reconnect|rpc|gbt|getblocktemplate|template|submit|stratum|socket|i/o|io error|orphan|stale|invalid|reject)"
+    )
+    counts = {}
+    for m in rx.findall((text or "").lower()):
+        counts[m] = counts.get(m, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
 class MonitorController:
@@ -53,6 +99,16 @@ class MonitorController:
 
         self.speed_tracker = SpeedTracker(window=self.speed_window)
 
+        # --- Bitaxe monitoring (AxeOS) ---
+        # If BITAXE_URL is unset/empty, Bitaxe monitoring stays disabled.
+        self.bitaxe_url = os.getenv("BITAXE_URL", "").strip()
+        self.bitaxe_check_interval = parse_duration(os.getenv("BITAXE_CHECK_INTERVAL", "30"), 30)
+        self.bitaxe_min_hashrate_hs = float(os.getenv("BITAXE_MIN_HASHRATE_HS", "200"))
+        self.bitaxe_no_share_sec = int(os.getenv("BITAXE_NO_SHARE_SEC", "300"))
+        self.bitaxe_alert_cooldown_sec = int(os.getenv("BITAXE_ALERT_COOLDOWN_SEC", "180"))
+
+        self.bitaxe_checker = None
+
         # State
         self.last_height_change_time = None
         self.last_fulcrum_height = None
@@ -70,6 +126,10 @@ class MonitorController:
                 "restart_fulcrum": self.restart_fulcrum_manual,
                 "restart_bitcoind": self.restart_bitcoind_manual,
                 "check_rpc": self.check_rpc,
+
+                # NEW: datum hooks for /datum and /investigate_datum
+                "datum_status": self.get_datum_status_text,
+                "investigate_datum": self.investigate_datum,
             }
             self.telegram_service = TelegramService(
                 self.bot_token,
@@ -109,21 +169,76 @@ class MonitorController:
             return "❌ bitcoind RPC failed."
         return f"✅ bitcoind RPC ok. Height={h}, latency={elapsed:.2f}s"
 
-    
+    # ----- DATUM: Telegram-facing -----
+
+    def get_datum_status_text(self):
+        """
+        Short status string for /datum.
+        """
+        host = os.uname().nodename
+        rc, out, err = _run(["/bin/systemctl", "is-active", self.datum_service], timeout=3)
+        active = (rc == 0 and out.strip() == "active")
+
+        # Grab a tiny bit of metadata for human debug value (no huge output)
+        rc2, out2, _ = _run(["/bin/systemctl", "show", self.datum_service, "-p", "MainPID", "-p", "ActiveEnterTimestamp"], timeout=3)
+        meta = " ".join([x.strip() for x in out2.splitlines() if x.strip()])
+
+        if active:
+            return f"[{host}] ✅ DATUM active ({self.datum_service}). {meta}"
+        return f"[{host}] ❌ DATUM inactive ({self.datum_service}). {meta}"
+
+    def investigate_datum(self):
+        """
+        Bounded diagnostic bundle for /investigate_datum.
+        """
+        host = os.uname().nodename
+
+        # 1) systemctl status (short)
+        _, status_out, status_err = _run(["/bin/systemctl", "status", self.datum_service, "-l", "--no-pager"], timeout=6)
+        status_txt = (status_out + ("\n" + status_err if status_err else "")).strip()
+
+        # 2) journal tail (bounded)
+        _, j_out, j_err = _run(["/bin/journalctl", "-u", self.datum_service, "-n", "160", "--no-pager", "-o", "short-iso"], timeout=8)
+        journal_txt = (j_out + ("\n" + j_err if j_err else "")).strip()
+
+        # 3) token summary from journal
+        counts = _token_counts(journal_txt)
+        top = ", ".join([f"{k}:{v}" for k, v in counts[:12]]) if counts else "none"
+
+        msg = (
+            f"[{host}] 🔎 DATUM investigate ({self.datum_service})\n"
+            f"token_counts: {top}\n\n"
+            "== systemctl status ==\n"
+            f"{_truncate(status_txt, 1600)}\n\n"
+            "== journal (tail) ==\n"
+            f"{_truncate(journal_txt, 1600)}"
+        )
+        return _truncate(msg, 3600)
+
+    # ----- DATUM: watchdog check (cooldown) -----
+
     def check_datum_service(self):
         # Minimal: alert if datum-gateway is not active (cooldown)
-        import subprocess, time
         now = time.time()
         last = getattr(self, "_datum_last_alert_ts", 0)
         try:
-            r = subprocess.run(["/bin/systemctl", "is-active", self.datum_service], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
+            r = subprocess.run(
+                ["/bin/systemctl", "is-active", self.datum_service],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=3,
+            )
             active = (r.returncode == 0 and r.stdout.strip() == "active")
         except Exception:
             active = False
+
         if not active and (now - last) >= self.datum_cooldown_sec:
             self._datum_last_alert_ts = now
             host = os.uname().nodename
-            txt = "[{0}] ⚠️ DATUM not active. Run: systemctl status {1} -l; journalctl -u {1} -n 80 --no-pager".format(host, self.datum_service)
+            txt = "[{0}] ⚠️ DATUM not active. Run: systemctl status {1} -l; journalctl -u {1} -n 80 --no-pager".format(
+                host, self.datum_service
+            )
             self.logger.log(txt)
             if self.telegram_service and self.telegram_service.client:
                 self.telegram_service.client.send_text(txt)
@@ -147,8 +262,48 @@ class MonitorController:
             f"CPU_ALERT={self.cpu_alert_threshold}%, RAM_ALERT={self.ram_alert_threshold}%"
         )
         self.logger.log(f"Charts every {self.chart_interval}s (approx).")
-        self.logger.log(f"ENABLE_AUTO_RESTART={self.enable_auto_restart}, "
-                        f"RPC_LATENCY_THRESHOLD={self.rpc_latency_threshold}s")
+        self.logger.log(
+            f"ENABLE_AUTO_RESTART={self.enable_auto_restart}, "
+            f"RPC_LATENCY_THRESHOLD={self.rpc_latency_threshold}s"
+        )
+
+        # --- Bitaxe monitoring init (AxeOS) ---
+        # Note: fulcrum_monitor.py calls maybe_start_telegram() before run(),
+        # so TelegramService.client should be available here if TELEGRAM_MODE=direct.
+        if self.bitaxe_url:
+            self.bitaxe_checker = BitaxeChecker(
+                base_url=self.bitaxe_url,
+                logger=self.logger,
+                telegram_client=self.telegram_service.client
+                if (self.telegram_service and self.telegram_service.client)
+                else None,
+                min_hashrate_hs=self.bitaxe_min_hashrate_hs,
+                no_share_sec=self.bitaxe_no_share_sec,
+                alert_cooldown_sec=self.bitaxe_alert_cooldown_sec,
+            )
+            self.logger.log(
+                f"[BITAXE] Enabled: url={self.bitaxe_url} interval={self.bitaxe_check_interval}s "
+                f"min_hr={self.bitaxe_min_hashrate_hs}H/s no_share={self.bitaxe_no_share_sec}s "
+                f"cooldown={self.bitaxe_alert_cooldown_sec}s"
+            )
+        else:
+            self.logger.log("[BITAXE] Disabled (BITAXE_URL not set).")
+
+        # --- Bitaxe poll loop (daemon) ---
+        # Must not depend on CHECK_INTERVAL; otherwise progress detection becomes unreliable at low share rates.
+        if self.bitaxe_checker:
+
+            def _bitaxe_loop():
+                while True:
+                    try:
+                        self.bitaxe_checker.tick()
+                    except Exception as e:
+                        # Contain failures; do not crash the main monitor.
+                        self.logger.log(f"[BITAXE] tick exception: {e}")
+                    time.sleep(max(5.0, float(self.bitaxe_check_interval)))
+
+            t = threading.Thread(target=_bitaxe_loop, name="bitaxe-loop", daemon=True)
+            t.start()
 
         while True:
             loop_start = time.time()
@@ -230,7 +385,7 @@ class MonitorController:
 
                             self.stall_notified = True
 
-            # Datum (minimal)
+            # Datum (minimal watchdog)
             self.check_datum_service()
 
             # System stats
