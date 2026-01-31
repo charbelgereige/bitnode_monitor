@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  bitnode-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bitnode-monitor:latest
+    container_name: bitnode-monitor
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Environment file
+    env_file:
+      - local.env
+
+    # Volume mounts
+    volumes:
+      # Application logs and charts
+      - ./monitor.log:/app/monitor.log
+      - ./charts:/app/charts
+
+      # Bitcoin configuration (read-only)
+      # Adjust path to match your BITCOIN_CONF in local.env
+      - /mnt/bitcoin/bitcoind/bitcoin.conf:/mnt/bitcoin/bitcoind/bitcoin.conf:ro
+
+      # Access to systemd for service control and journalctl
+      # Required for monitoring Fulcrum logs and restarting services
+      - /run/systemd:/run/systemd:ro
+      - /var/run/dbus:/var/run/dbus:ro
+
+      # Access to journal logs (for Fulcrum height monitoring)
+      - /var/log/journal:/var/log/journal:ro
+      - /run/log/journal:/run/log/journal:ro
+
+      # Access to bitcoin-cli (if needed)
+      # Uncomment and adjust if bitcoin-cli is not in standard PATH
+      # - /usr/local/bin/bitcoin-cli:/usr/local/bin/bitcoin-cli:ro
+
+    # Network mode: host allows direct access to bitcoind RPC
+    # Change to 'bridge' if you prefer isolated networking
+    network_mode: host
+
+    # Privileged mode may be required for:
+    # - systemctl commands
+    # - accessing journal logs
+    # - smartctl for SSD temperature
+    # Set to false if you don't need service restart functionality
+    privileged: true
+
+    # Alternative to privileged mode (more secure):
+    # Uncomment these and comment out 'privileged: true' above
+    # cap_add:
+    #   - SYS_ADMIN
+    #   - DAC_READ_SEARCH
+    # security_opt:
+    #   - apparmor:unconfined
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.path.exists('monitor.log') or exit(1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+# Optional: Named volume for persistent data
+# volumes:
+#   monitor_data:
+#     driver: local

@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bitnode-monitor"
+version = "1.0.0"
+description = "Bitcoin/Fulcrum/Datum monitoring tool with Telegram bot integration"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Charbel Gereige"}
+]
+keywords = ["bitcoin", "fulcrum", "monitoring", "telegram", "bitcoind"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Topic :: System :: Monitoring",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "requests>=2.31.0",
+    "psutil>=5.9.0",
+    "python-dotenv>=1.0.0",
+    "matplotlib>=3.7.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "flake8>=6.0",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+bitnode-monitor = "fulcrum_monitor:main"
+
+[project.urls]
+Homepage = "https://github.com/charbelgereige/bitnode_monitor"
+Repository = "https://github.com/charbelgereige/bitnode_monitor"
+Issues = "https://github.com/charbelgereige/bitnode_monitor/issues"
+
+[tool.setuptools]
+py-modules = [
+    "fulcrum_monitor",
+    "monitor_controller",
+    "config",
+    "telegram_service",
+    "telegram_client",
+    "relay_telegram_client",
+    "node_client",
+    "speed_tracker",
+    "speed_history",
+    "eta_model",
+    "status_builder",
+    "charts",
+    "system_info",
+    "service_control",
+    "system_metrics",
+    "logger_util",
+    "system_helpers",
+    "chart_writer",
+    "bitnode_control",
+    "fulcrum_telegram_control"
+]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311']
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
