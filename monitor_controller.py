@@ -81,12 +81,14 @@ class MonitorController:
         self.bitcoind_service = os.getenv("BITCOIND_SERVICE", "bitcoind")
         self.datum_service = os.getenv("DATUM_SERVICE", "datum-gateway")
         self.datum_cooldown_sec = int(os.getenv("DATUM_COOLDOWN_SEC", "900"))  # 15 min
+        self.datum_no_job_sec = int(os.getenv("DATUM_NO_JOB_SEC", "300"))  # 5 min
 
         # DATUM monitor (extracted)
         self.datum_monitor = DatumMonitor(
             self.datum_service,
             self.logger,
             cooldown_sec=self.datum_cooldown_sec,
+            no_job_sec=self.datum_no_job_sec,
             telegram_client=None,
         )
 
@@ -139,6 +141,7 @@ class MonitorController:
                 # NEW: datum hooks for /datum and /investigate_datum
                 "datum_status": self.get_datum_status_text,
                 "investigate_datum": self.investigate_datum,
+                "mining_status": self.get_mining_status_text,
             }
             self.telegram_service = TelegramService(
                 self.bot_token,
@@ -187,6 +190,11 @@ class MonitorController:
     def investigate_datum(self):
         """Bounded diagnostic bundle for /investigate_datum."""
         return self.datum_monitor.investigate_text()
+
+    def get_mining_status_text(self):
+        """Mining job status for /mining."""
+        return self.datum_monitor.mining_status_text()
+
 
     def check_datum_service(self):
         """Minimal watchdog: alert (cooldown) if datum service is not active."""

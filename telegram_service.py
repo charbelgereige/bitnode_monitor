@@ -61,6 +61,28 @@ class TelegramService:
       - datum_status() -> str
       - investigate_datum() -> str
     """
+    _ALIASES = {
+        "/h": "/help",
+        "/ns": "/status",
+        "/ms": "/mining",
+        "/ds": "/datum",
+        "/id": "/investigate_datum",
+        "/rpc": "/check_rpc",
+        "/rf": "/restart_fulcrum",
+        "/rb": "/restart_bitcoind",
+    }
+
+    _SHORTCUTS = {
+        "/start": ["/status", "/mining", "/datum"],
+        "/help": ["/status", "/mining", "/datum"],
+        "/status": ["/mining", "/datum"],
+        "/mining": ["/status"],
+        "/datum": ["/investigate_datum"],
+        "/investigate_datum": ["/status", "/mining"],
+        "/check_rpc": ["/status"],
+        "/restart_fulcrum": ["/status"],
+        "/restart_bitcoind": ["/status"],
+    }
 
     def __init__(
         self,
@@ -140,6 +162,7 @@ class TelegramService:
 
         # Normalize command
         t = text.split()[0].strip()
+        cmd = self._ALIASES.get(t, t)
 
         def _cb(name: str):
             return self.callbacks.get(name)
@@ -147,32 +170,35 @@ class TelegramService:
         def _send_cb_text(cb_name: str, missing_msg: str) -> None:
             fn = _cb(cb_name)
             if fn:
-                self.client.send_text(fn())
+                self.client.send_text(self._with_shortcuts(fn(), cmd))
             else:
-                self.client.send_text(missing_msg)
+                self.client.send_text(self._with_shortcuts(missing_msg, cmd))
 
         def _restart(cb_name: str, missing_msg: str, ok_msg: str) -> None:
             fn = _cb(cb_name)
             if not fn:
-                self.client.send_text(missing_msg)
+                self.client.send_text(self._with_shortcuts(missing_msg, cmd))
                 return
             out = fn()
             if isinstance(out, str) and out.strip():
-                self.client.send_text(out)
+                self.client.send_text(self._with_shortcuts(out, cmd))
             else:
-                self.client.send_text(ok_msg)
+                self.client.send_text(self._with_shortcuts(ok_msg, cmd))
 
         def _investigate(cb_name: str, missing_msg: str) -> None:
             fn = _cb(cb_name)
             if not fn:
-                self.client.send_text(missing_msg)
+                self.client.send_text(self._with_shortcuts(missing_msg, cmd))
                 return
             self.client.send_chat_action("typing")
-            self.client.send_text(fn(), disable_web_page_preview=True)
+            self.client.send_text(
+                self._with_shortcuts(fn(), cmd),
+                disable_web_page_preview=True,
+            )
 
         dispatch = {
-            "/start": lambda: self.client.send_text(self._help_text()),
-            "/help": lambda: self.client.send_text(self._help_text()),
+            "/start": lambda: self.client.send_text(self._with_shortcuts(self._help_text(), cmd)),
+            "/help": lambda: self.client.send_text(self._with_shortcuts(self._help_text(), cmd)),
 
             "/status": lambda: _send_cb_text("status_text", "status_text callback not configured."),
             "/check_rpc": lambda: _send_cb_text("check_rpc", "check_rpc callback not configured."),
@@ -190,27 +216,59 @@ class TelegramService:
 
             "/datum": lambda: _send_cb_text("datum_status", "datum_status callback not configured."),
             "/investigate_datum": lambda: _investigate("investigate_datum", "investigate_datum callback not configured."),
+            "/mining": lambda: _send_cb_text("mining_status", "mining_status callback not configured."),
         }
 
-        handler = dispatch.get(t)
+        handler = dispatch.get(cmd)
         if handler:
             handler()
             return
 
-        self.client.send_text("Unknown command. Send /help for available commands.")
+        self.client.send_text(self._with_shortcuts("Unknown command. Send /help for available commands.", cmd))
 
     def _help_text(self) -> str:
         return (
             "Bitnode Monitor Commands:\n"
-            "/status - show current status\n"
-            "/check_rpc - test bitcoind RPC\n"
-            "/restart_fulcrum - restart fulcrum\n"
-            "/restart_bitcoind - restart bitcoind\n"
-            "/datum - show DATUM service status\n"
-            "/investigate_datum - collect DATUM diagnostics\n"
+            "/status (/ns) - show current status\n"
+            "/check_rpc (/rpc) - test bitcoind RPC\n"
+            "/restart_fulcrum (/rf) - restart fulcrum\n"
+            "/restart_bitcoind (/rb) - restart bitcoind\n"
+            "/datum (/ds) - show DATUM service status\n"
+            "/investigate_datum (/id) - collect DATUM diagnostics\n"
+            "/mining (/ms) - show mining job status\n"
+            "/help (/h) - show available commands\n"
         )
 
-def _run_selftest() -> int:
+    def _shortcuts_for(self, cmd: str):
+        if not cmd:
+            shortcuts = ["/help", "/status"]
+        else:
+            cmd = self._ALIASES.get(cmd, cmd)
+            if cmd in self._SHORTCUTS:
+                shortcuts = list(self._SHORTCUTS[cmd])
+            else:
+                shortcuts = ["/help", "/status"]
+
+        if "/help" not in shortcuts:
+            shortcuts.append("/help")
+
+        seen = set()
+        out = []
+        for c in shortcuts:
+            if c not in seen:
+                seen.add(c)
+                out.append(c)
+        return out
+
+    def _with_shortcuts(self, text: str, cmd: str) -> str:
+        if text is None:
+            text = ""
+        shortcuts = self._shortcuts_for(cmd)
+        if not shortcuts:
+            return text
+        return f"{text.rstrip()}\n\nShortcuts: {' '.join(shortcuts)}"
+
+    def _run_selftest() -> int:
     """
     Local, network-free self-test for TelegramService command dispatch.
     Run: python telegram_service.py --selftest
@@ -269,12 +327,16 @@ def _run_selftest() -> int:
     # /status
     send("/status")
     assert invoked[-1] == "status_text"
-    assert svc.client.calls[-1][0] == "send_text" and svc.client.calls[-1][1] == "OK"
+    assert svc.client.calls[-1][0] == "send_text"
+    assert svc.client.calls[-1][1].startswith("OK")
+    assert "Shortcuts:" in svc.client.calls[-1][1]
 
     # /datum
     send("/datum")
     assert invoked[-1] == "datum_status"
-    assert svc.client.calls[-1][0] == "send_text" and svc.client.calls[-1][1] == "OK"
+    assert svc.client.calls[-1][0] == "send_text"
+    assert svc.client.calls[-1][1].startswith("OK")
+    assert "Shortcuts:" in svc.client.calls[-1][1]
 
     # /investigate_datum: typing then message
     before = len(svc.client.calls)
@@ -282,12 +344,15 @@ def _run_selftest() -> int:
     after_calls = svc.client.calls[before:]
     assert invoked[-1] == "investigate_datum"
     assert after_calls[0] == ("send_chat_action", "typing"), "Typing action should be first"
-    assert after_calls[1][0] == "send_text" and after_calls[1][1] == "INVESTIGATE OUT"
+    assert after_calls[1][0] == "send_text"
+    assert after_calls[1][1].startswith("INVESTIGATE OUT")
+    assert "Shortcuts:" in after_calls[1][1]
 
     # Unknown command
     send("/does_not_exist")
     assert svc.client.calls[-1][0] == "send_text"
-    assert svc.client.calls[-1][1] == "Unknown command. Send /help for available commands."
+    assert svc.client.calls[-1][1].startswith("Unknown command. Send /help for available commands.")
+    assert "Shortcuts:" in svc.client.calls[-1][1]
 
     return 0
 
