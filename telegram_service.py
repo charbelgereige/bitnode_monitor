@@ -268,7 +268,7 @@ class TelegramService:
             return text
         return f"{text.rstrip()}\n\nShortcuts: {' '.join(shortcuts)}"
 
-    def _run_selftest() -> int:
+def _run_selftest() -> int:
     """
     Local, network-free self-test for TelegramService command dispatch.
     Run: python telegram_service.py --selftest

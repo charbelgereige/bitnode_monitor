@@ -52,7 +52,7 @@ class DatumMonitor:
     # Regex to parse job lines like:
     # 2026-02-07 12:23:56.837 ... Updating standard stratum job for block 935399: 3.13248456 BTC, 563 txns, 298993 bytes (Sent to 1 stratum client)
     JOB_RE = re.compile(
-        r"Updating standard stratum job for block (\d+): ([\d.]+) BTC, (\d+) txns, (\d+) bytes \(Sent to (\d+)"
+        r"Updating (?:standard|priority) stratum job for block (\d+): ([\d.]+) BTC, (\d+) txns, (\d+) bytes \(Sent to (\d+)"
     )
 
     def __init__(
@@ -89,15 +89,12 @@ class DatumMonitor:
         for line in reversed(out.strip().splitlines()):
             m = self.JOB_RE.search(line)
             if m:
-                # Extract timestamp from line start (format: 2026-02-07T12:23:56+0200)
-                ts_match = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", line)
-                ts = None
-                if ts_match:
-                    try:
-                        ts = datetime.fromisoformat(ts_match.group(1)).timestamp()
-                    except Exception:
-                        ts = time.time()
-                else:
+                # Extract timestamp from journalctl -o short-iso (first token, includes timezone)
+                # Example: 2026-02-07T14:40:56+02:00
+                ts_tok = line.split(None, 1)[0] if line.strip() else ""
+                try:
+                    ts = datetime.fromisoformat(ts_tok).timestamp()
+                except Exception:
                     ts = time.time()
 
                 return {
