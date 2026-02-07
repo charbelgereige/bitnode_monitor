@@ -28,7 +28,7 @@ def main():
     run([PYTHON, "telegram_service.py", "--selftest"],
         "telegram dispatcher selftest")
 
-    run([PYTHON, "-c", "from monitor_controller import MonitorController; MonitorController(); print(ok)"],
+    run([PYTHON, "-c", "from monitor_controller import MonitorController; MonitorController(); print("ok")"],
         "monitor_controller import + init")
 
     print("[OK] All offline checks passed.")
