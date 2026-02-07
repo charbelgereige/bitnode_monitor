@@ -141,66 +141,60 @@ class TelegramService:
         # Normalize command
         t = text.split()[0].strip()
 
-        if t in ("/start", "/help"):
-            self.client.send_text(self._help_text())
-            return
+        def _cb(name: str):
+            return self.callbacks.get(name)
 
-        if t == "/status":
-            fn = self.callbacks.get("status_text")
+        def _send_cb_text(cb_name: str, missing_msg: str) -> None:
+            fn = _cb(cb_name)
             if fn:
                 self.client.send_text(fn())
             else:
-                self.client.send_text("status_text callback not configured.")
-            return
+                self.client.send_text(missing_msg)
 
-        if t == "/check_rpc":
-            fn = self.callbacks.get("check_rpc")
-            if fn:
-                self.client.send_text(fn())
+        def _restart(cb_name: str, missing_msg: str, ok_msg: str) -> None:
+            fn = _cb(cb_name)
+            if not fn:
+                self.client.send_text(missing_msg)
+                return
+            out = fn()
+            if isinstance(out, str) and out.strip():
+                self.client.send_text(out)
             else:
-                self.client.send_text("check_rpc callback not configured.")
-            return
+                self.client.send_text(ok_msg)
 
-        if t == "/restart_fulcrum":
-            fn = self.callbacks.get("restart_fulcrum")
-            if fn:
-                out = fn()
-                if isinstance(out, str) and out.strip():
-                    self.client.send_text(out)
-                else:
-                    self.client.send_text("Requested Fulcrum restart.")
-            else:
-                self.client.send_text("restart_fulcrum callback not configured.")
-            return
+        def _investigate(cb_name: str, missing_msg: str) -> None:
+            fn = _cb(cb_name)
+            if not fn:
+                self.client.send_text(missing_msg)
+                return
+            self.client.send_chat_action("typing")
+            self.client.send_text(fn(), disable_web_page_preview=True)
 
-        if t == "/restart_bitcoind":
-            fn = self.callbacks.get("restart_bitcoind")
-            if fn:
-                out = fn()
-                if isinstance(out, str) and out.strip():
-                    self.client.send_text(out)
-                else:
-                    self.client.send_text("Requested bitcoind restart.")
-            else:
-                self.client.send_text("restart_bitcoind callback not configured.")
-            return
+        dispatch = {
+            "/start": lambda: self.client.send_text(self._help_text()),
+            "/help": lambda: self.client.send_text(self._help_text()),
 
-        # NEW: DATUM commands
-        if t == "/datum":
-            fn = self.callbacks.get("datum_status")
-            if fn:
-                self.client.send_text(fn())
-            else:
-                self.client.send_text("datum_status callback not configured.")
-            return
+            "/status": lambda: _send_cb_text("status_text", "status_text callback not configured."),
+            "/check_rpc": lambda: _send_cb_text("check_rpc", "check_rpc callback not configured."),
 
-        if t == "/investigate_datum":
-            fn = self.callbacks.get("investigate_datum")
-            if fn:
-                self.client.send_chat_action("typing")
-                self.client.send_text(fn(), disable_web_page_preview=True)
-            else:
-                self.client.send_text("investigate_datum callback not configured.")
+            "/restart_fulcrum": lambda: _restart(
+                "restart_fulcrum",
+                "restart_fulcrum callback not configured.",
+                "Requested Fulcrum restart.",
+            ),
+            "/restart_bitcoind": lambda: _restart(
+                "restart_bitcoind",
+                "restart_bitcoind callback not configured.",
+                "Requested bitcoind restart.",
+            ),
+
+            "/datum": lambda: _send_cb_text("datum_status", "datum_status callback not configured."),
+            "/investigate_datum": lambda: _investigate("investigate_datum", "investigate_datum callback not configured."),
+        }
+
+        handler = dispatch.get(t)
+        if handler:
+            handler()
             return
 
         self.client.send_text("Unknown command. Send /help for available commands.")
@@ -215,3 +209,93 @@ class TelegramService:
             "/datum - show DATUM service status\n"
             "/investigate_datum - collect DATUM diagnostics\n"
         )
+
+def _run_selftest() -> int:
+    """
+    Local, network-free self-test for TelegramService command dispatch.
+    Run: python telegram_service.py --selftest
+    """
+    class _Logger:
+        def log(self, msg: str) -> None:
+            # Keep silent in selftest; uncomment for debugging.
+            # print(msg)
+            pass
+
+    class _FakeClient:
+        def __init__(self, chat_id: str):
+            self.chat_id = str(chat_id)
+            self.calls = []  # list[tuple[str, ...]]
+
+        def send_text(self, text: str, disable_web_page_preview: bool = True) -> None:
+            self.calls.append(("send_text", text, str(disable_web_page_preview)))
+
+        def send_chat_action(self, action: str = "typing") -> None:
+            self.calls.append(("send_chat_action", action))
+
+    invoked = []
+
+    def _cb(name):
+        def _fn():
+            invoked.append(name)
+            if name == "restart_fulcrum":
+                return ""  # should trigger default message
+            if name == "restart_bitcoind":
+                return "custom bitcoind restart message"
+            if name == "investigate_datum":
+                return "INVESTIGATE OUT"
+            return "OK"
+        return _fn
+
+    callbacks = {
+        "status_text": _cb("status_text"),
+        "check_rpc": _cb("check_rpc"),
+        "restart_fulcrum": _cb("restart_fulcrum"),
+        "restart_bitcoind": _cb("restart_bitcoind"),
+        "datum_status": _cb("datum_status"),
+        "investigate_datum": _cb("investigate_datum"),
+    }
+
+    svc = TelegramService("DUMMY_TOKEN", "123", _Logger(), callbacks=callbacks)
+    svc.client = _FakeClient("123")  # override network client
+
+    def send(cmd: str, chat_id: str = "123"):
+        upd = {"update_id": 1, "message": {"chat": {"id": chat_id}, "text": cmd}}
+        svc._handle_update(upd)
+
+    # Ignore other chats
+    send("/status", chat_id="999")
+    assert svc.client.calls == [], "Should ignore other chat_id"
+
+    # /status
+    send("/status")
+    assert invoked[-1] == "status_text"
+    assert svc.client.calls[-1][0] == "send_text" and svc.client.calls[-1][1] == "OK"
+
+    # /datum
+    send("/datum")
+    assert invoked[-1] == "datum_status"
+    assert svc.client.calls[-1][0] == "send_text" and svc.client.calls[-1][1] == "OK"
+
+    # /investigate_datum: typing then message
+    before = len(svc.client.calls)
+    send("/investigate_datum")
+    after_calls = svc.client.calls[before:]
+    assert invoked[-1] == "investigate_datum"
+    assert after_calls[0] == ("send_chat_action", "typing"), "Typing action should be first"
+    assert after_calls[1][0] == "send_text" and after_calls[1][1] == "INVESTIGATE OUT"
+
+    # Unknown command
+    send("/does_not_exist")
+    assert svc.client.calls[-1][0] == "send_text"
+    assert svc.client.calls[-1][1] == "Unknown command. Send /help for available commands."
+
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--selftest" in sys.argv:
+        rc = _run_selftest()
+        print("SELFTEST OK" if rc == 0 else f"SELFTEST FAIL rc={rc}")
+        raise SystemExit(rc)

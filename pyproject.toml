@@ -72,7 +72,9 @@ py-modules = [
     "system_helpers",
     "chart_writer",
     "bitnode_control",
-    "fulcrum_telegram_control"
+    "fulcrum_telegram_control",
+    "datum_monitor",
+    "bitaxe_checker"
 ]
 
 [tool.black]

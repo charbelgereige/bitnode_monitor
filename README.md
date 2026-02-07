@@ -11,6 +11,7 @@ A comprehensive Bitcoin/Fulcrum/Datum monitoring tool with Telegram bot integrat
 - **Auto-Recovery**: Automatic service restart on detected stalls
 - **Speed Tracking**: EMA-based speed calculation with historical analysis
 - **Chart Generation**: Visual charts for speed trends and system telemetry
+- **Bitaxe Miner Monitoring**: Track hashrate, accepted/rejected shares, fallback pool alerts
 - **Service Control**: Restart bitcoind, Fulcrum, or Datum services via Telegram
 
 ## Prerequisites
@@ -43,20 +44,7 @@ source venv/bin/activate  # On Linux/Mac
 pip install -r requirements.txt
 ```
 
-### Option 2: Using Anaconda
-
-```bash
-# Create conda environment
-conda create -n bitnode-monitor python=3.11
-
-# Activate environment
-conda activate bitnode-monitor
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### Option 3: Using Docker (Recommended for Production)
+### Option 2: Using Docker (Recommended for Production)
 
 ```bash
 # Build the Docker image
@@ -171,16 +159,22 @@ sudo systemctl start bitnode-monitor
 
 Once running, you can interact with the bot via Telegram:
 
-- `/status` or `status` - Show complete status (heights, lag, ETA, CPU/RAM)
-- `/heights` or `lag` - Show block heights only
-- `/speeds` - Show speed and ETA history
-  - `/speeds -h 10` - Show first 10 entries
-  - `/speeds -t 20` - Show last 20 entries
-- `/chart` - Generate and send speed/system telemetry charts
-- `/restart fulcrum` - Restart Fulcrum service
-- `/restart bitcoind` - Restart bitcoind service
-- `/check rpc` - Test bitcoind RPC latency
-- `/help` - Show help message
+- `/status` - Show current status (heights, lag, ETA, CPU/RAM)
+- `/check_rpc` - Test bitcoind RPC latency
+- `/restart_fulcrum` - Restart Fulcrum service
+- `/restart_bitcoind` - Restart bitcoind service
+- `/datum` - Show DATUM service status
+- `/investigate_datum` - Collect DATUM diagnostics (systemctl status + journal logs)
+- `/help` - Show available commands
+
+Additionally, `fulcrum_telegram_control.py` provides a separate control bot for updating configuration remotely:
+
+- `/status` - Show current config values (CHECK_INTERVAL, STALL_THRESHOLD, etc.)
+- `/set CHECK_INTERVAL <value>` - Update check interval
+- `/set STALL_THRESHOLD <value>` - Update stall threshold
+- `/set CHART_INTERVAL <value>` - Update chart interval
+- `/set AUTO_RESTART <on|off>` - Enable/disable auto-restart
+- `/help` - Show control bot help
 
 ## Project Structure
 
@@ -205,6 +199,8 @@ bitnode_monitor/
 ├── service_control.py          # systemd service control
 ├── bitnode_control.py          # HTTP control server
 ├── fulcrum_telegram_control.py # Fulcrum Telegram control commands
+├── datum_monitor.py            # DATUM gateway monitoring and diagnostics
+├── bitaxe_checker.py           # Bitaxe miner health checker
 ├── logger_util.py              # Logging utility
 ├── Dockerfile                  # Docker build configuration
 ├── docker-compose.yml          # Docker Compose orchestration

@@ -21,6 +21,7 @@ from service_control import restart_fulcrum, restart_bitcoind
 from status_builder import build_status_text
 from telegram_service import TelegramService
 from bitaxe_checker import BitaxeChecker
+from datum_monitor import DatumMonitor
 
 
 def _run(cmd, timeout=6):
@@ -80,6 +81,14 @@ class MonitorController:
         self.bitcoind_service = os.getenv("BITCOIND_SERVICE", "bitcoind")
         self.datum_service = os.getenv("DATUM_SERVICE", "datum-gateway")
         self.datum_cooldown_sec = int(os.getenv("DATUM_COOLDOWN_SEC", "900"))  # 15 min
+
+        # DATUM monitor (extracted)
+        self.datum_monitor = DatumMonitor(
+            self.datum_service,
+            self.logger,
+            cooldown_sec=self.datum_cooldown_sec,
+            telegram_client=None,
+        )
 
         self.check_interval = parse_duration(os.getenv("CHECK_INTERVAL", "120"), 120)
         self.stall_threshold = parse_duration(os.getenv("STALL_THRESHOLD", "1800"), 1800)
@@ -172,82 +181,23 @@ class MonitorController:
     # ----- DATUM: Telegram-facing -----
 
     def get_datum_status_text(self):
-        """
-        Short status string for /datum.
-        """
-        host = os.uname().nodename
-        rc, out, err = _run(["/bin/systemctl", "is-active", self.datum_service], timeout=3)
-        active = (rc == 0 and out.strip() == "active")
-
-        # Grab a tiny bit of metadata for human debug value (no huge output)
-        rc2, out2, _ = _run(["/bin/systemctl", "show", self.datum_service, "-p", "MainPID", "-p", "ActiveEnterTimestamp"], timeout=3)
-        meta = " ".join([x.strip() for x in out2.splitlines() if x.strip()])
-
-        if active:
-            return f"[{host}] ✅ DATUM active ({self.datum_service}). {meta}"
-        return f"[{host}] ❌ DATUM inactive ({self.datum_service}). {meta}"
+        """Short status string for /datum."""
+        return self.datum_monitor.status_text()
 
     def investigate_datum(self):
-        """
-        Bounded diagnostic bundle for /investigate_datum.
-        """
-        host = os.uname().nodename
-
-        # 1) systemctl status (short)
-        _, status_out, status_err = _run(["/bin/systemctl", "status", self.datum_service, "-l", "--no-pager"], timeout=6)
-        status_txt = (status_out + ("\n" + status_err if status_err else "")).strip()
-
-        # 2) journal tail (bounded)
-        _, j_out, j_err = _run(["/bin/journalctl", "-u", self.datum_service, "-n", "160", "--no-pager", "-o", "short-iso"], timeout=8)
-        journal_txt = (j_out + ("\n" + j_err if j_err else "")).strip()
-
-        # 3) token summary from journal
-        counts = _token_counts(journal_txt)
-        top = ", ".join([f"{k}:{v}" for k, v in counts[:12]]) if counts else "none"
-
-        msg = (
-            f"[{host}] 🔎 DATUM investigate ({self.datum_service})\n"
-            f"token_counts: {top}\n\n"
-            "== systemctl status ==\n"
-            f"{_truncate(status_txt, 1600)}\n\n"
-            "== journal (tail) ==\n"
-            f"{_truncate(journal_txt, 1600)}"
-        )
-        return _truncate(msg, 3600)
-
-    # ----- DATUM: watchdog check (cooldown) -----
+        """Bounded diagnostic bundle for /investigate_datum."""
+        return self.datum_monitor.investigate_text()
 
     def check_datum_service(self):
-        # Minimal: alert if datum-gateway is not active (cooldown)
-        now = time.time()
-        last = getattr(self, "_datum_last_alert_ts", 0)
-        try:
-            r = subprocess.run(
-                ["/bin/systemctl", "is-active", self.datum_service],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=3,
-            )
-            active = (r.returncode == 0 and r.stdout.strip() == "active")
-        except Exception:
-            active = False
-
-        if not active and (now - last) >= self.datum_cooldown_sec:
-            self._datum_last_alert_ts = now
-            host = os.uname().nodename
-            txt = "[{0}] ⚠️ DATUM not active. Run: systemctl status {1} -l; journalctl -u {1} -n 80 --no-pager".format(
-                host, self.datum_service
-            )
-            self.logger.log(txt)
-            if self.telegram_service and self.telegram_service.client:
-                self.telegram_service.client.send_text(txt)
-
-    # ----- Telegram startup -----
+        """Minimal watchdog: alert (cooldown) if datum service is not active."""
+        return self.datum_monitor.watchdog_tick()
 
     def maybe_start_telegram(self):
         if self.telegram_service:
             self.telegram_service.start()
+            # Ensure DatumMonitor can send alerts once Telegram client is ready
+            if getattr(self, "datum_monitor", None) and getattr(self.telegram_service, "client", None):
+                self.datum_monitor.telegram_client = self.telegram_service.client
         else:
             self.logger.log("[MAIN] Telegram disabled or missing BOT_TOKEN/CHAT_ID.")
 
