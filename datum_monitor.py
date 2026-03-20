@@ -182,12 +182,29 @@ class DatumMonitor:
         )
         return _truncate(msg, 3600)
 
+    def check_for_template_errors(self):
+        now = time.time()
+        host = os.uname().nodename
+        _, out, _ = _run(
+            ["/bin/journalctl", "-u", self.service_name, "--since", "3 minutes ago", "--no-pager"],
+            timeout=8,
+        )
+        if "Could not fetch new template" in out:
+            if (now - self._last_alert_ts) >= self.cooldown_sec:
+                self._last_alert_ts = now
+                txt = f"[{host}] ⚠️ DATUM Error: Could not fetch new block template from bitcoind."
+                self.logger.log(txt)
+                if self.telegram_client:
+                    self.telegram_client.send_text(txt)
+
     def watchdog_tick(self) -> None:
         """
         Watchdog: alert if service inactive, no job progress, or 0 clients.
         """
         now = time.time()
         host = os.uname().nodename
+
+        self.check_for_template_errors()
 
         # Check 1: Service active?
         try:
