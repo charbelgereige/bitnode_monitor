@@ -215,7 +215,13 @@ ssh charb@knots00 "tail -50 /home/charb/fulcrum-bot/monitor.log"
 
 ### Recent Deployments
 
-**2026-04-07**: Fixed `datum_monitor.py` missing `__init__` method
+**2026-04-07 14:20**: Improved DATUM template error alerting
+- Issue: Frequent alerts for brief template fetch errors due to memory pressure/swap
+- Root Cause: Pi has 4GB RAM but 1.9GB in swap; bitcoind occasionally swapped causing brief RPC slowdowns
+- Solution: Updated `check_for_template_errors()` to require 10+ errors in 3 minutes before alerting
+- Result: Reduces false positive alerts while still catching sustained outages
+
+**2026-04-07 11:41**: Fixed `datum_monitor.py` missing `__init__` method
 - Issue: Service was crash-looping with `TypeError: DatumMonitor() takes no arguments`
 - Solution: Deployed updated `datum_monitor.py` from repository
 - Result: Service now running successfully
@@ -235,5 +241,9 @@ ssh charb@knots00 "tail -50 /home/charb/fulcrum-bot/monitor.log"
 - Bitaxe monitoring enabled (IP: 192.168.68.102)
 
 ### Known Issues
-- DATUM gateway shows intermittent template fetch errors (normal behavior, recovers automatically)
+- **DATUM template fetch errors**: Brief bursts (1-3 minutes) of template fetch errors occur due to memory pressure
+  - Root cause: System has high swap usage (~1.9GB of 2GB), causing bitcoind to occasionally be swapped out
+  - Impact: Errors happen every 20-30 minutes but recover automatically
+  - Alerts: Only sent if 10+ errors occur within 3 minutes (sustained outage)
+  - Mitigation: Consider reducing bitcoind dbcache (currently 1400MB) or adding more RAM
 - Initial startup shows "[WARN] Could not read heights" - this is normal and clears after first check cycle

@@ -183,16 +183,25 @@ class DatumMonitor:
         return _truncate(msg, 3600)
 
     def check_for_template_errors(self):
+        """
+        Check for template fetch errors and alert if threshold exceeded.
+        Only alert if we see sustained errors (10+ in last 3 minutes) to avoid
+        alerting on brief swap-related hiccups.
+        """
         now = time.time()
         host = os.uname().nodename
         _, out, _ = _run(
             ["/bin/journalctl", "-u", self.service_name, "--since", "3 minutes ago", "--no-pager"],
             timeout=8,
         )
-        if "Could not fetch new template" in out:
+        # Count template fetch errors
+        error_count = out.count("Could not fetch new template")
+
+        # Only alert if we have sustained errors (10+ in 3 minutes means ~2 minutes of continuous failures)
+        if error_count >= 10:
             if (now - self._last_alert_ts) >= self.cooldown_sec:
                 self._last_alert_ts = now
-                txt = f"[{host}] ⚠️ DATUM Error: Could not fetch new block template from bitcoind."
+                txt = f"[{host}] ⚠️ DATUM Error: Could not fetch new block template from bitcoind ({error_count} errors in 3 min)."
                 self.logger.log(txt)
                 if self.telegram_client:
                     self.telegram_client.send_text(txt)
