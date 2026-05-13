@@ -58,6 +58,14 @@ class BitaxeChecker:
         self._fallback_state_change_ts: float = 0.0  # When did we last change pool state
         self._last_daily_summary_ts: float = 0.0  # Last time we sent daily summary
 
+        # Flapping detection: track recent state changes to detect unstable pool switching
+        self._state_change_history: list = []  # List of (timestamp, state) tuples
+        self._flapping_detected: bool = False
+        self._flapping_alert_sent_ts: float = 0.0
+        self._flap_threshold: int = 4  # Number of state changes to consider flapping
+        self._flap_window_sec: int = 300  # Time window (5 minutes) to detect flapping
+        self._flap_cooldown_sec: int = 3600  # Once flapping, only re-alert after 1 hour
+
     def _fetch(self) -> BitaxeSnapshot:
         url = f"{self.base_url}/api/system/info"
         ts = time.time()
@@ -162,28 +170,76 @@ class BitaxeChecker:
             elif self._last_accept_change_ts is None:
                 self._last_accept_change_ts = snap.ts
 
-        # WARNING: pool state change detection (primary ↔ fallback)
+        # WARNING: pool state change detection (primary ↔ fallback) with flapping detection
         if snap.ok and snap.is_using_fallback is not None:
             # Detect state changes
             if self._last_pool_state is not None and self._last_pool_state != snap.is_using_fallback:
-                # State changed! Alert immediately
-                if snap.is_using_fallback == 1:
-                    # Switched to fallback
-                    alert_msg = (
-                        f"[BITAXE] ⚠️ Switched to FALLBACK pool.\n"
-                        f"Primary: {snap.primary}\n"
-                        f"Fallback: {snap.fallback}\n"
-                        f"Status: hr={snap.hash_rate_hs:.0f}H/s acc={snap.shares_accepted} rej={snap.shares_rejected}"
-                    )
-                else:
-                    # Restored to primary
-                    alert_msg = (
-                        f"[BITAXE] ✅ Restored to PRIMARY pool.\n"
-                        f"Primary: {snap.primary}\n"
-                        f"Status: hr={snap.hash_rate_hs:.0f}H/s acc={snap.shares_accepted} rej={snap.shares_rejected}"
-                    )
-                self._send(alert_msg)
+                # State changed! Record it
+                self._state_change_history.append((snap.ts, snap.is_using_fallback))
                 self._fallback_state_change_ts = snap.ts
+
+                # Clean up old history outside the flap window
+                cutoff = snap.ts - self._flap_window_sec
+                self._state_change_history = [(ts, state) for ts, state in self._state_change_history if ts > cutoff]
+
+                # Check if we're flapping (multiple rapid state changes)
+                if len(self._state_change_history) >= self._flap_threshold:
+                    # Flapping detected!
+                    if not self._flapping_detected:
+                        # First time detecting flap - send alert
+                        self._flapping_detected = True
+                        flap_count = len(self._state_change_history)
+                        window_min = self._flap_window_sec / 60
+                        alert_msg = (
+                            f"[BITAXE] 🔄 Pool FLAPPING detected!\n"
+                            f"Switched {flap_count} times in {window_min:.0f} minutes.\n"
+                            f"Primary: {snap.primary}\n"
+                            f"Fallback: {snap.fallback}\n"
+                            f"Currently on: {'FALLBACK' if snap.is_using_fallback == 1 else 'PRIMARY'}\n"
+                            f"This usually means the primary pool is unreachable.\n"
+                            f"Further flip-flop alerts suppressed until stable."
+                        )
+                        self._send(alert_msg)
+                        self._flapping_alert_sent_ts = snap.ts
+                    elif (snap.ts - self._flapping_alert_sent_ts) >= self._flap_cooldown_sec:
+                        # Still flapping after cooldown - send reminder
+                        alert_msg = (
+                            f"[BITAXE] 🔄 Pool still FLAPPING.\n"
+                            f"Currently on: {'FALLBACK' if snap.is_using_fallback == 1 else 'PRIMARY'}\n"
+                            f"Primary pool appears to be down or unstable."
+                        )
+                        self._send(alert_msg)
+                        self._flapping_alert_sent_ts = snap.ts
+                else:
+                    # Normal state change (not flapping)
+                    if not self._flapping_detected:
+                        # Send individual state change alert
+                        if snap.is_using_fallback == 1:
+                            alert_msg = (
+                                f"[BITAXE] ⚠️ Switched to FALLBACK pool.\n"
+                                f"Primary: {snap.primary}\n"
+                                f"Fallback: {snap.fallback}\n"
+                                f"Status: hr={snap.hash_rate_hs:.0f}H/s acc={snap.shares_accepted} rej={snap.shares_rejected}"
+                            )
+                        else:
+                            alert_msg = (
+                                f"[BITAXE] ✅ Restored to PRIMARY pool.\n"
+                                f"Primary: {snap.primary}\n"
+                                f"Status: hr={snap.hash_rate_hs:.0f}H/s acc={snap.shares_accepted} rej={snap.shares_rejected}"
+                            )
+                        self._send(alert_msg)
+
+            # Check if flapping has stopped (no changes in flap window)
+            if self._flapping_detected and len(self._state_change_history) < 2:
+                # Stabilized! Send recovery alert
+                self._flapping_detected = False
+                alert_msg = (
+                    f"[BITAXE] ✅ Pool STABLE - flapping resolved.\n"
+                    f"Now mining on: {'FALLBACK' if snap.is_using_fallback == 1 else 'PRIMARY'}\n"
+                    f"Status: hr={snap.hash_rate_hs:.0f}H/s acc={snap.shares_accepted} rej={snap.shares_rejected}"
+                )
+                self._send(alert_msg)
+                self._state_change_history.clear()
 
             # Update tracked state
             self._last_pool_state = snap.is_using_fallback
