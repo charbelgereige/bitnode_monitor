@@ -155,7 +155,13 @@ class MonitorController:
     # ----- Callbacks for Telegram -----
 
     def get_status_text(self):
-        return build_status_text(self.bitcoin_conf, self.fulcrum_service, self.speed_tracker, self.logger)
+        return build_status_text(
+            self.bitcoin_conf,
+            self.fulcrum_service,
+            self.speed_tracker,
+            self.logger,
+            bitaxe_checker=self.bitaxe_checker
+        )
 
     def restart_fulcrum_manual(self):
         restart_fulcrum(
@@ -193,7 +199,7 @@ class MonitorController:
 
     def get_mining_status_text(self):
         """Mining job status for /mining."""
-        return self.datum_monitor.mining_status_text()
+        return self.datum_monitor.mining_status_text(bitaxe_checker=self.bitaxe_checker)
 
 
     def check_datum_service(self):

@@ -123,7 +123,7 @@ def _check_active_alerts(metrics):
     return active_alerts
 
 
-def build_status_text(*_args, **_kwargs):
+def build_status_text(*_args, bitaxe_checker=None, **_kwargs):
     base_dir = Path(__file__).resolve().parent
     log_file = base_dir / 'monitor.log'
     lines = ['📊 *Bitnode Status*', '']
@@ -148,6 +148,12 @@ def build_status_text(*_args, **_kwargs):
     else:
         lines.append('⚠️ Datum: Unknown')
     lines.append('')
+
+    # Bitaxe pool status
+    if bitaxe_checker:
+        pool_status = bitaxe_checker.get_pool_status_line()
+        lines.append(pool_status)
+        lines.append('')
 
     # System metrics
     metrics = _get_system_metrics()

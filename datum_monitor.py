@@ -107,7 +107,7 @@ class DatumMonitor:
                 }
         return None
 
-    def mining_status_text(self) -> str:
+    def mining_status_text(self, bitaxe_checker=None) -> str:
         """
         Format mining status for /mining command.
         """
@@ -115,25 +115,32 @@ class DatumMonitor:
         job = self.parse_last_job()
 
         if not job:
-            return f"[{host}] ⛏️ Mining Status\nNo recent job data found in datum-gateway logs."
-
-        now = time.time()
-        age_sec = now - job["timestamp"]
-        if age_sec < 60:
-            age_str = f"{int(age_sec)}s ago"
-        elif age_sec < 3600:
-            age_str = f"{int(age_sec / 60)}m ago"
+            base_msg = f"[{host}] ⛏️ Mining Status\nNo recent job data found in datum-gateway logs."
         else:
-            age_str = f"{age_sec / 3600:.1f}h ago"
+            now = time.time()
+            age_sec = now - job["timestamp"]
+            if age_sec < 60:
+                age_str = f"{int(age_sec)}s ago"
+            elif age_sec < 3600:
+                age_str = f"{int(age_sec / 60)}m ago"
+            else:
+                age_str = f"{age_sec / 3600:.1f}h ago"
 
-        size_kb = job["bytes"] / 1024
+            size_kb = job["bytes"] / 1024
 
-        return (
-            f"[{host}] ⛏️ Mining Status\n"
-            f"Block: {job['block']} | Reward: {job['btc']:.8f} BTC\n"
-            f"Txns: {job['txns']} | Size: {size_kb:.1f} KB\n"
-            f"Clients: {job['clients']} | Last job: {age_str}"
-        )
+            base_msg = (
+                f"[{host}] ⛏️ Mining Status\n"
+                f"Block: {job['block']} | Reward: {job['btc']:.8f} BTC\n"
+                f"Txns: {job['txns']} | Size: {size_kb:.1f} KB\n"
+                f"Clients: {job['clients']} | Last job: {age_str}"
+            )
+
+        # Add pool status if available
+        if bitaxe_checker:
+            pool_status = bitaxe_checker.get_pool_status_line()
+            return f"{base_msg}\n\n{pool_status}"
+
+        return base_msg
 
     def status_text(self) -> str:
         """
