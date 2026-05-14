@@ -178,11 +178,14 @@ def get_bitcoind_state(bitcoin_conf: str, logger):
                 ibd = None
 
                 for line in reversed(lines):
-                    # Example: UpdateTip: new best=... height=948285
+                    # Example: UpdateTip: new best=... height=948285 ... progress=0.997044
                     if "UpdateTip:" in line and "height=" in line:
-                        m = re.search(r'height=(\d+)', line)
-                        if m and blocks is None:
-                            blocks = int(m.group(1))
+                        m_height = re.search(r'height=(\d+)', line)
+                        m_progress = re.search(r'progress=([0-9.]+)', line)
+                        if m_height and blocks is None:
+                            blocks = int(m_height.group(1))
+                        if m_progress and progress is None:
+                            progress = float(m_progress.group(1))
 
                     # Example: Progress: 99.72% (headers=949342, synced to=948285)
                     if "Progress:" in line:
@@ -204,8 +207,12 @@ def get_bitcoind_state(bitcoin_conf: str, logger):
                 elif progress is not None:
                     ibd = False
 
+                # Estimate headers if we have blocks and progress
+                if headers is None and blocks is not None and progress is not None and progress > 0:
+                    headers = int(blocks / progress)
+
                 if blocks or headers or progress is not None:
-                    logger.log(f"[INFO] Using fallback log parsing (RPC unavailable): blocks={blocks}, headers={headers}, progress={progress}")
+                    logger.log(f"[INFO] Using fallback log parsing: blocks={blocks}, headers={headers}, progress={progress:.4f if progress else None}, ibd={ibd}")
                     return {
                         "ok": True,
                         "blocks": blocks,
