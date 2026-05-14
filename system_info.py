@@ -212,7 +212,8 @@ def get_bitcoind_state(bitcoin_conf: str, logger):
                     headers = int(blocks / progress)
 
                 if blocks or headers or progress is not None:
-                    logger.log(f"[INFO] Using fallback log parsing: blocks={blocks}, headers={headers}, progress={progress:.4f if progress else None}, ibd={ibd}")
+                    progress_str = f"{progress:.4f}" if progress is not None else "None"
+                    logger.log(f"[INFO] Using fallback log parsing: blocks={blocks}, headers={headers}, progress={progress_str}, ibd={ibd}")
                     return {
                         "ok": True,
                         "blocks": blocks,

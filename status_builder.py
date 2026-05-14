@@ -215,17 +215,16 @@ def build_status_text(*_args, bitaxe_checker=None, **_kwargs):
             lines.append(f'✅ *Bitcoind: Synced* (height: {blocks:,})')
             lines.append('')
 
-    # Heights (Fulcrum lag)
-    any_line, num_line = _extract_last_heights_lines(log_file)
-    if num_line:
-        _, height_line = _strip_prefix(num_line)
-    elif any_line:
-        _, height_line = _strip_prefix(any_line)
-    else:
-        height_line = 'Heights: (no data yet)'
-
-    # Only show Fulcrum lag if not in IBD
+    # Heights - always show if node is synced to network or not
     if not (ibd_state['ok'] and ibd_state['ibd']):
+        # Not in IBD - show Fulcrum lag from bitcoind
+        any_line, num_line = _extract_last_heights_lines(log_file)
+        if num_line:
+            _, height_line = _strip_prefix(num_line)
+        elif any_line:
+            _, height_line = _strip_prefix(any_line)
+        else:
+            height_line = 'Heights: (no data yet)'
         lines.append(f'⛓ {height_line}')
         lines.append('')
 
