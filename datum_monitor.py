@@ -8,6 +8,8 @@ import platform
 from datetime import datetime
 from typing import Optional, Dict, Any
 
+from system_info import get_bitcoind_state
+
 
 def _run(cmd, timeout=6):
     """
@@ -95,22 +97,13 @@ class DatumMonitor:
         """
         Check if bitcoind is in Initial Block Download (IBD) mode.
         Returns True if in IBD, False otherwise.
+        Uses fallback log parsing if RPC is unavailable.
         """
-        try:
-            out = subprocess.check_output(
-                [
-                    "sudo", "-u", "bitcoin",
-                    "/usr/local/bin/bitcoin-cli",
-                    f"-conf={self.bitcoin_conf}",
-                    "getblockchaininfo",
-                ],
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
-            j = json.loads(out.decode("utf-8", errors="replace"))
-            return bool(j.get("initialblockdownload", False))
-        except Exception:
-            return False
+        ibd_state = get_bitcoind_state(self.bitcoin_conf, self.logger)
+        if ibd_state.get("ok") and ibd_state.get("ibd") is not None:
+            return ibd_state["ibd"]
+        # If we can't determine IBD state, assume not in IBD (conservative)
+        return False
 
     def parse_last_job(self) -> Optional[Dict[str, Any]]:
         """

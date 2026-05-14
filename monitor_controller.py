@@ -4,6 +4,7 @@ import os
 import threading
 import subprocess
 import re
+import json
 from pathlib import Path
 
 
@@ -72,6 +73,7 @@ class MonitorController:
         self.log_file = base_dir / "monitor.log"
         self.speed_chart_file = base_dir / "speed_chart.png"
         self.system_chart_file = base_dir / "system_chart.png"
+        self.state_file = base_dir / "monitor_state.json"
 
         self.logger = Logger(self.log_file)
 
@@ -131,9 +133,16 @@ class MonitorController:
         self.stall_notified = False
 
         # IBD milestone tracking
-        self.last_ibd_milestone = 0  # Last milestone we notified (e.g., 95, 98, 99)
         self.ibd_milestones = [90, 95, 98, 99, 99.5, 99.9]  # Progress % to notify at
-        self.last_ibd_daily_update = 0  # Last daily update timestamp
+
+        # Load persisted state (milestone, daily update timestamps)
+        self._bitaxe_state = {}  # Will be populated by _load_state if file exists
+        self._load_state()
+        # If state not loaded, initialize to defaults
+        if not hasattr(self, 'last_ibd_milestone'):
+            self.last_ibd_milestone = 0
+        if not hasattr(self, 'last_ibd_daily_update'):
+            self.last_ibd_daily_update = 0
 
         # Telegram service
         self.telegram_service = None
@@ -158,6 +167,39 @@ class MonitorController:
                 self.system_chart_file,
                 callbacks,
             )
+
+    # ----- State Persistence -----
+
+    def _load_state(self):
+        """Load persisted state from JSON file."""
+        if not self.state_file.exists():
+            return
+        try:
+            with self.state_file.open('r') as f:
+                state = json.load(f)
+                self.last_ibd_milestone = state.get('last_ibd_milestone', 0)
+                self.last_ibd_daily_update = state.get('last_ibd_daily_update', 0)
+                # Store bitaxe state for later loading into checker
+                self._bitaxe_state = state.get('bitaxe', {})
+        except Exception as e:
+            self.logger.log(f"[WARN] Failed to load state: {e}")
+
+    def _save_state(self):
+        """Save state to JSON file."""
+        try:
+            state = {
+                'last_ibd_milestone': self.last_ibd_milestone,
+                'last_ibd_daily_update': self.last_ibd_daily_update,
+            }
+            # Save bitaxe state if checker exists
+            if self.bitaxe_checker:
+                state['bitaxe'] = {
+                    'last_daily_summary_ts': self.bitaxe_checker._last_daily_summary_ts,
+                }
+            with self.state_file.open('w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            self.logger.log(f"[WARN] Failed to save state: {e}")
 
     # ----- Callbacks for Telegram -----
 
@@ -328,7 +370,11 @@ class MonitorController:
                 min_hashrate_hs=self.bitaxe_min_hashrate_hs,
                 no_share_sec=self.bitaxe_no_share_sec,
                 alert_cooldown_sec=self.bitaxe_alert_cooldown_sec,
+                state_callback=self._save_state,
             )
+            # Restore persisted state if available
+            if self._bitaxe_state.get('last_daily_summary_ts'):
+                self.bitaxe_checker._last_daily_summary_ts = self._bitaxe_state['last_daily_summary_ts']
             self.logger.log(
                 f"[BITAXE] Enabled: url={self.bitaxe_url} interval={self.bitaxe_check_interval}s "
                 f"min_hr={self.bitaxe_min_hashrate_hs}H/s no_share={self.bitaxe_no_share_sec}s "
@@ -416,6 +462,7 @@ class MonitorController:
                     for milestone in self.ibd_milestones:
                         if progress >= milestone and self.last_ibd_milestone < milestone:
                             self.last_ibd_milestone = milestone
+                            self._save_state()  # Persist milestone state
 
                             # Calculate ETA
                             if ema_speed is not None and ema_speed > 0 and remaining > 0:
@@ -444,6 +491,7 @@ class MonitorController:
                     # Daily IBD update (once per day while in IBD)
                     if (loop_start - self.last_ibd_daily_update) >= 86400:  # 24 hours
                         self.last_ibd_daily_update = loop_start
+                        self._save_state()  # Persist daily update timestamp
 
                         if ema_speed is not None and ema_speed > 0 and remaining > 0:
                             eta_sec = remaining / ema_speed

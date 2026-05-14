@@ -40,10 +40,12 @@ class BitaxeChecker:
         min_hashrate_hs: float = 50.0,   # treat below as "not mining"
         no_share_sec: int = 900,         # urgent if no accepted shares change for this long
         alert_cooldown_sec: int = 300,   # avoid spamming
+        state_callback=None,              # callback to save state after updates
     ):
         self.base_url = base_url.rstrip("/")
         self.logger = logger
         self.tg = telegram_client
+        self.state_callback = state_callback
         self.timeout_sec = timeout_sec
 
         self.min_hashrate_hs = float(min_hashrate_hs)
@@ -150,6 +152,9 @@ class BitaxeChecker:
                 )
                 self._send(summary)
             self._last_daily_summary_ts = now
+            # Notify controller to save state
+            if self.state_callback:
+                self.state_callback()
 
     def tick(self) -> Tuple[Optional[BitaxeSnapshot], Optional[str]]:
         """
