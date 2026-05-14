@@ -130,6 +130,11 @@ class MonitorController:
         self.min_recovery_interval = 600  # 10 min
         self.stall_notified = False
 
+        # IBD milestone tracking
+        self.last_ibd_milestone = 0  # Last milestone we notified (e.g., 95, 98, 99)
+        self.ibd_milestones = [90, 95, 98, 99, 99.5, 99.9]  # Progress % to notify at
+        self.last_ibd_daily_update = 0  # Last daily update timestamp
+
         # Telegram service
         self.telegram_service = None
         if self.enable_telegram and self.bot_token and self.chat_id:
@@ -351,11 +356,18 @@ class MonitorController:
         while True:
             loop_start = time.time()
 
+            # Check IBD state first to adjust behavior
+            from system_info import get_bitcoind_state
+            ibd_state = get_bitcoind_state(self.bitcoin_conf, self.logger)
+            in_ibd = ibd_state.get("ibd", False)
+
             btc_height = get_bitcoind_height(self.bitcoin_conf, self.logger)
             ful_height = get_fulcrum_height(self.fulcrum_service, self.logger)
 
             if btc_height is None or ful_height is None:
-                self.logger.log("[WARN] Could not read heights (bitcoind or fulcrum).")
+                # During IBD, suppress "Could not read heights" warnings
+                if not in_ibd:
+                    self.logger.log("[WARN] Could not read heights (bitcoind or fulcrum).")
             else:
                 # Only treat as new datapoint when Fulcrum height actually advances
                 if self.last_fulcrum_height is None or ful_height != self.last_fulcrum_height:
@@ -373,7 +385,16 @@ class MonitorController:
                     stdev_str = f"{stdev:.3f}" if stdev is not None else "N/A"
 
                     # Only log when Fulcrum height changed (no spam on stale data)
-                    if ful_height != self.last_logged_height:
+                    # During IBD, log less frequently (every 10th height change)
+                    should_log = ful_height != self.last_logged_height
+                    if in_ibd and should_log:
+                        # Log every 10 blocks during IBD to reduce noise
+                        if self.last_logged_height is None or (ful_height - self.last_logged_height) >= 10:
+                            should_log = True
+                        else:
+                            should_log = False
+
+                    if should_log:
                         self.logger.log(
                             f"Heights: bitcoind={btc_height}, fulcrum={ful_height}, "
                             f"lag={lag} blocks, speed~={speed_str} blk/s (σ={stdev_str}), ETA={eta_str}"
@@ -383,6 +404,68 @@ class MonitorController:
                     self.last_fulcrum_height = ful_height
                     self.last_height_change_time = loop_start
                     self.stall_notified = False
+
+                # IBD milestone notifications
+                if in_ibd and ibd_state.get("ok"):
+                    progress = ibd_state.get("verificationprogress", 0.0) * 100
+                    blocks = ibd_state.get("blocks", 0)
+                    headers = ibd_state.get("headers", 0)
+                    remaining = headers - blocks
+
+                    # Check if we crossed a milestone
+                    for milestone in self.ibd_milestones:
+                        if progress >= milestone and self.last_ibd_milestone < milestone:
+                            self.last_ibd_milestone = milestone
+
+                            # Calculate ETA
+                            if ema_speed is not None and ema_speed > 0 and remaining > 0:
+                                eta_sec = remaining / ema_speed
+                                eta_hours = eta_sec / 3600.0
+                                if eta_hours < 1:
+                                    eta_str = f"{eta_sec / 60:.0f} minutes"
+                                elif eta_hours < 48:
+                                    eta_str = f"{eta_hours:.1f} hours"
+                                else:
+                                    eta_str = f"{eta_hours / 24:.1f} days"
+                            else:
+                                eta_str = "calculating..."
+
+                            msg = (
+                                f"🔄 IBD Progress: {progress:.2f}% complete\n"
+                                f"Blocks: {blocks:,} / {headers:,}\n"
+                                f"Remaining: {remaining:,} blocks\n"
+                                f"ETA: ~{eta_str}"
+                            )
+                            self.logger.log(f"[IBD MILESTONE] {milestone}% - {msg}")
+                            if self.telegram_service and self.telegram_service.client:
+                                self.telegram_service.client.send_text(msg)
+                            break
+
+                    # Daily IBD update (once per day while in IBD)
+                    if (loop_start - self.last_ibd_daily_update) >= 86400:  # 24 hours
+                        self.last_ibd_daily_update = loop_start
+
+                        if ema_speed is not None and ema_speed > 0 and remaining > 0:
+                            eta_sec = remaining / ema_speed
+                            eta_hours = eta_sec / 3600.0
+                            if eta_hours < 48:
+                                eta_str = f"{eta_hours:.1f} hours"
+                            else:
+                                eta_str = f"{eta_hours / 24:.1f} days"
+                        else:
+                            eta_str = "calculating..."
+
+                        msg = (
+                            f"📊 Daily IBD Update\n"
+                            f"Progress: {progress:.2f}%\n"
+                            f"Blocks: {blocks:,} / {headers:,}\n"
+                            f"Remaining: {remaining:,} blocks\n"
+                            f"Sync speed: {ema_speed:.4f} blk/s\n"
+                            f"ETA: ~{eta_str}"
+                        )
+                        self.logger.log(f"[IBD DAILY] {msg}")
+                        if self.telegram_service and self.telegram_service.client:
+                            self.telegram_service.client.send_text(msg)
 
                 else:
                     # Fulcrum height unchanged

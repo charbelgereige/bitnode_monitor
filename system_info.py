@@ -44,8 +44,24 @@ def get_bitcoind_height(bitcoin_conf: str, logger):
                 "getblockcount",
             ],
             stderr=subprocess.DEVNULL,
+            timeout=15,
         )
         return int(out.strip())
+    except subprocess.TimeoutExpired:
+        # During IBD, RPC can be slow - this is expected, don't log as error
+        ibd_state = get_bitcoind_state(bitcoin_conf, logger)
+        if ibd_state.get("ibd"):
+            # Suppress error during IBD - just return None silently
+            return None
+        logger.log(f"[WARN] get_bitcoind_height timed out (not in IBD)")
+        return None
+    except subprocess.CalledProcessError as e:
+        # RPC errors during IBD are expected when bitcoind is busy
+        ibd_state = get_bitcoind_state(bitcoin_conf, logger)
+        if ibd_state.get("ibd"):
+            return None  # Suppress during IBD
+        logger.log(f"[ERR] get_bitcoind_height failed: {e}")
+        return None
     except Exception as e:
         logger.log(f"[ERR] get_bitcoind_height failed: {e}")
         return None
@@ -122,6 +138,8 @@ def get_bitcoind_state(bitcoin_conf: str, logger):
     Keys:
       ok(bool), blocks(int|None), headers(int|None),
       ibd(bool|None), verificationprogress(float|None), warnings(str|None)
+
+    Falls back to reading debug.log if RPC is unavailable.
     """
     try:
         out = subprocess.check_output(
@@ -144,6 +162,62 @@ def get_bitcoind_state(bitcoin_conf: str, logger):
             "warnings": j.get("warnings"),
         }
     except Exception as e:
+        # Fallback: try to read from bitcoind debug.log
+        try:
+            import re
+            log_path = Path("/mnt/bitcoin/bitcoind/debug.log")
+            if log_path.exists():
+                # Read last 500 lines
+                with log_path.open() as f:
+                    lines = f.readlines()[-500:]
+
+                # Look for progress indicators
+                blocks = None
+                headers = None
+                progress = None
+                ibd = None
+
+                for line in reversed(lines):
+                    # Example: UpdateTip: new best=... height=948285
+                    if "UpdateTip:" in line and "height=" in line:
+                        m = re.search(r'height=(\d+)', line)
+                        if m and blocks is None:
+                            blocks = int(m.group(1))
+
+                    # Example: Progress: 99.72% (headers=949342, synced to=948285)
+                    if "Progress:" in line:
+                        m_pct = re.search(r'Progress:\s*([0-9.]+)%', line)
+                        m_headers = re.search(r'headers=(\d+)', line)
+                        if m_pct:
+                            progress = float(m_pct.group(1)) / 100.0
+                        if m_headers:
+                            headers = int(m_headers.group(1))
+
+                    # Check for IBD completion message
+                    if "Leaving InitialBlockDownload" in line:
+                        ibd = False
+                        break
+
+                # If we found progress data, assume still in IBD if < 99.99%
+                if progress is not None and progress < 0.9999:
+                    ibd = True
+                elif progress is not None:
+                    ibd = False
+
+                if blocks or headers or progress is not None:
+                    logger.log(f"[INFO] Using fallback log parsing (RPC unavailable): blocks={blocks}, headers={headers}, progress={progress}")
+                    return {
+                        "ok": True,
+                        "blocks": blocks,
+                        "headers": headers,
+                        "ibd": ibd,
+                        "verificationprogress": progress,
+                        "warnings": None,
+                    }
+        except Exception as log_err:
+            logger.log(f"[WARN] Fallback log parsing also failed: {log_err}")
+
+        # Both RPC and log parsing failed
         logger.log(f"[ERR] get_bitcoind_state failed: {e}")
         return {
             "ok": False,

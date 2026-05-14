@@ -173,17 +173,41 @@ def build_status_text(*_args, bitaxe_checker=None, **_kwargs):
     ibd_state = _get_bitcoind_ibd_state()
     if ibd_state['ok'] and ibd_state['ibd'] is not None:
         if ibd_state['ibd']:
-            # In IBD - show detailed sync progress
+            # In IBD - show detailed sync progress with ETA
             blocks = ibd_state['blocks'] or 0
             headers = ibd_state['headers'] or 0
             remaining = headers - blocks
             progress = ibd_state['verificationprogress'] or 0.0
             progress_pct = progress * 100
 
+            # Calculate ETA from monitor log
+            eta_str = "calculating..."
+            try:
+                with log_file.open() as f:
+                    for line in reversed(list(f)):
+                        if "speed~=" in line and "ETA=" in line and "Heights:" in line:
+                            import re
+                            speed_m = re.search(r'speed~=([0-9.]+)', line)
+                            if speed_m:
+                                speed = float(speed_m.group(1))
+                                if speed > 0 and remaining > 0:
+                                    eta_sec = remaining / speed
+                                    eta_hours = eta_sec / 3600.0
+                                    if eta_hours < 1:
+                                        eta_str = f"{eta_sec / 60:.0f} min"
+                                    elif eta_hours < 48:
+                                        eta_str = f"{eta_hours:.1f} hours"
+                                    else:
+                                        eta_str = f"{eta_hours / 24:.1f} days"
+                            break
+            except Exception:
+                pass
+
             lines.append(f'🔄 *Bitcoind: Syncing (IBD)*')
             lines.append(f'   Blocks: {blocks:,} / {headers:,}')
             lines.append(f'   Remaining: {remaining:,} blocks')
             lines.append(f'   Progress: {progress_pct:.2f}%')
+            lines.append(f'   ETA: ~{eta_str}')
             lines.append('')
         else:
             # Synced - just show current height

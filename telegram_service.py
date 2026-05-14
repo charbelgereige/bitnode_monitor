@@ -108,6 +108,11 @@ class TelegramService:
         self._poll_timeout = 25  # seconds
         self._poll_sleep = 0.5
 
+        # Error rate limiting to prevent log spam
+        self._error_count = 0
+        self._last_error_log_ts = 0.0
+        self._error_log_interval = 300  # Log TG errors at most once per 5 minutes
+
         self.logger.log("[TG] Telegram client initialized.")
 
     def start(self) -> None:
@@ -127,9 +132,21 @@ class TelegramService:
         try:
             r = self.client.session.get(f"{self.client.base}/getUpdates", params=params, timeout=self._poll_timeout + 5)
             r.raise_for_status()
+            # Reset error count on success
+            if self._error_count > 0:
+                self.logger.log(f"[TG] Connection restored after {self._error_count} errors")
+                self._error_count = 0
             return r.json()
         except Exception as e:
-            self.logger.log(f"[TG] get_updates error: {e}")
+            # Rate-limit error logging to prevent spam
+            import time
+            now = time.time()
+            self._error_count += 1
+
+            if (now - self._last_error_log_ts) >= self._error_log_interval:
+                self.logger.log(f"[TG] Connection issues ({self._error_count} errors in {int(now - self._last_error_log_ts)}s): {e}")
+                self._last_error_log_ts = now
+                self._error_count = 0
             return None
 
     def _loop(self) -> None:

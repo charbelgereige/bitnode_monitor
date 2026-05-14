@@ -186,7 +186,7 @@ class BitaxeChecker:
                 if len(self._state_change_history) >= self._flap_threshold:
                     # Flapping detected!
                     if not self._flapping_detected:
-                        # First time detecting flap - send alert
+                        # First time detecting flap - send alert ONCE
                         self._flapping_detected = True
                         flap_count = len(self._state_change_history)
                         window_min = self._flap_window_sec / 60
@@ -197,19 +197,11 @@ class BitaxeChecker:
                             f"Fallback: {snap.fallback}\n"
                             f"Currently on: {'FALLBACK' if snap.is_using_fallback == 1 else 'PRIMARY'}\n"
                             f"This usually means the primary pool is unreachable.\n"
-                            f"Further flip-flop alerts suppressed until stable."
+                            f"No further alerts until pool stabilizes."
                         )
                         self._send(alert_msg)
                         self._flapping_alert_sent_ts = snap.ts
-                    elif (snap.ts - self._flapping_alert_sent_ts) >= self._flap_cooldown_sec:
-                        # Still flapping after cooldown - send reminder
-                        alert_msg = (
-                            f"[BITAXE] 🔄 Pool still FLAPPING.\n"
-                            f"Currently on: {'FALLBACK' if snap.is_using_fallback == 1 else 'PRIMARY'}\n"
-                            f"Primary pool appears to be down or unstable."
-                        )
-                        self._send(alert_msg)
-                        self._flapping_alert_sent_ts = snap.ts
+                    # Remove the hourly reminder - it's just noise
                 else:
                     # Normal state change (not flapping)
                     if not self._flapping_detected:
