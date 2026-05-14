@@ -70,18 +70,20 @@ class TelegramService:
         "/rpc": "/check_rpc",
         "/rf": "/restart_fulcrum",
         "/rb": "/restart_bitcoind",
+        "/nd": "/node",
     }
 
     _SHORTCUTS = {
         "/start": ["/status", "/mining", "/datum"],
         "/help": ["/status", "/mining", "/datum"],
-        "/status": ["/mining", "/datum"],
+        "/status": ["/mining", "/datum", "/node"],
         "/mining": ["/status"],
         "/datum": ["/investigate_datum"],
         "/investigate_datum": ["/status", "/mining"],
         "/check_rpc": ["/status"],
         "/restart_fulcrum": ["/status"],
         "/restart_bitcoind": ["/status"],
+        "/node": ["/status", "/mining"],
     }
 
     def __init__(
@@ -217,6 +219,7 @@ class TelegramService:
             "/datum": lambda: _send_cb_text("datum_status", "datum_status callback not configured."),
             "/investigate_datum": lambda: _investigate("investigate_datum", "investigate_datum callback not configured."),
             "/mining": lambda: _send_cb_text("mining_status", "mining_status callback not configured."),
+            "/node": lambda: _send_cb_text("node_status", "node_status callback not configured."),
         }
 
         handler = dispatch.get(cmd)
@@ -230,6 +233,7 @@ class TelegramService:
         return (
             "Bitnode Monitor Commands:\n"
             "/status (/ns) - show current status\n"
+            "/node (/nd) - show detailed bitcoind sync status\n"
             "/check_rpc (/rpc) - test bitcoind RPC\n"
             "/restart_fulcrum (/rf) - restart fulcrum\n"
             "/restart_bitcoind (/rb) - restart bitcoind\n"

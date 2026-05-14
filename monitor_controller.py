@@ -90,6 +90,7 @@ class MonitorController:
             cooldown_sec=self.datum_cooldown_sec,
             no_job_sec=self.datum_no_job_sec,
             telegram_client=None,
+            bitcoin_conf=self.bitcoin_conf,
         )
 
         self.check_interval = parse_duration(os.getenv("CHECK_INTERVAL", "120"), 120)
@@ -142,6 +143,7 @@ class MonitorController:
                 "datum_status": self.get_datum_status_text,
                 "investigate_datum": self.investigate_datum,
                 "mining_status": self.get_mining_status_text,
+                "node_status": self.get_node_status_text,
             }
             self.telegram_service = TelegramService(
                 self.bot_token,
@@ -201,6 +203,83 @@ class MonitorController:
         """Mining job status for /mining."""
         return self.datum_monitor.mining_status_text(bitaxe_checker=self.bitaxe_checker)
 
+    def get_node_status_text(self):
+        """Detailed bitcoind sync status for /node."""
+        import json
+        import time
+        from pathlib import Path
+
+        host = _run(["hostname"], timeout=2)[1].strip() or "knots00"
+
+        try:
+            out = _run(
+                ["sudo", "-u", "bitcoin", "/usr/local/bin/bitcoin-cli", f"-conf={self.bitcoin_conf}", "getblockchaininfo"],
+                timeout=10,
+            )[1]
+            info = json.loads(out)
+        except Exception as e:
+            return f"[{host}] ❌ Failed to get bitcoind info: {e}"
+
+        blocks = info.get("blocks", 0)
+        headers = info.get("headers", 0)
+        remaining = headers - blocks
+        progress = info.get("verificationprogress", 0.0)
+        progress_pct = progress * 100
+        ibd = info.get("initialblockdownload", False)
+        chain = info.get("chain", "unknown")
+        size_on_disk = info.get("size_on_disk", 0) / (1024**3)  # GB
+        warnings = info.get("warnings", "")
+
+        lines = [f"[{host}] 🔗 Bitcoind Node Status"]
+        lines.append(f"Chain: {chain}")
+        lines.append("")
+
+        if ibd:
+            lines.append("🔄 *Status: Syncing (IBD)*")
+            lines.append(f"Blocks: {blocks:,} / {headers:,}")
+            lines.append(f"Remaining: {remaining:,} blocks")
+            lines.append(f"Progress: {progress_pct:.4f}%")
+
+            # Calculate ETA based on recent sync speed from monitor log
+            base_dir = Path(__file__).resolve().parent
+            log_file = base_dir / "monitor.log"
+            eta_str = "calculating..."
+
+            try:
+                # Parse last height line for speed estimate
+                with log_file.open() as f:
+                    for line in reversed(list(f)):
+                        if "speed~=" in line and "ETA=" in line:
+                            import re
+                            speed_m = re.search(r'speed~=([0-9.]+)', line)
+                            if speed_m:
+                                speed = float(speed_m.group(1))
+                                if speed > 0:
+                                    eta_sec = remaining / speed
+                                    eta_hours = eta_sec / 3600.0
+                                    if eta_hours < 1:
+                                        eta_str = f"{eta_sec / 60:.1f} minutes"
+                                    elif eta_hours < 48:
+                                        eta_str = f"{eta_hours:.1f} hours"
+                                    else:
+                                        eta_str = f"{eta_hours / 24:.1f} days"
+                            break
+            except Exception:
+                pass
+
+            lines.append(f"ETA: ~{eta_str}")
+        else:
+            lines.append("✅ *Status: Synced*")
+            lines.append(f"Height: {blocks:,}")
+
+        lines.append("")
+        lines.append(f"Disk Usage: {size_on_disk:.1f} GB")
+
+        if warnings:
+            lines.append("")
+            lines.append(f"⚠️ Warnings: {warnings}")
+
+        return "\n".join(lines)
 
     def check_datum_service(self):
         """Minimal watchdog: alert (cooldown) if datum service is not active."""

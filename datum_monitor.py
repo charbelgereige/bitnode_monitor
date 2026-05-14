@@ -3,6 +3,8 @@ import os
 import re
 import time
 import subprocess
+import json
+import platform
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -48,6 +50,19 @@ def _token_counts(text: str):
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
+def _get_hostname():
+    """
+    Get hostname in a cross-platform way.
+    On Linux: os.uname().nodename
+    On Windows: platform.uname().node
+    """
+    try:
+        return os.uname().nodename
+    except AttributeError:
+        # Windows doesn't have os.uname()
+        return platform.uname().node
+
+
 class DatumMonitor:
     # Regex to parse job lines like:
     # 2026-02-07 12:23:56.837 ... Updating standard stratum job for block 935399: 3.13248456 BTC, 563 txns, 298993 bytes (Sent to 1 stratum client)
@@ -62,16 +77,40 @@ class DatumMonitor:
         cooldown_sec: int = 900,
         no_job_sec: int = 300,
         telegram_client=None,
+        bitcoin_conf: str = None,
     ):
         self.service_name = service_name
         self.logger = logger
         self.cooldown_sec = int(cooldown_sec)
         self.no_job_sec = int(no_job_sec)
         self.telegram_client = telegram_client
+        self.bitcoin_conf = bitcoin_conf or os.getenv("BITCOIN_CONF", "/mnt/bitcoin/bitcoind/bitcoin.conf")
         self._last_alert_ts = 0.0
         self._last_zero_client_alert_ts = 0.0
         self._last_job_ts: Optional[float] = None
         self._last_job_info: Optional[Dict[str, Any]] = None
+        self._ibd_cooldown_multiplier = 10  # 10x longer cooldown during IBD
+
+    def _check_ibd_state(self) -> bool:
+        """
+        Check if bitcoind is in Initial Block Download (IBD) mode.
+        Returns True if in IBD, False otherwise.
+        """
+        try:
+            out = subprocess.check_output(
+                [
+                    "sudo", "-u", "bitcoin",
+                    "/usr/local/bin/bitcoin-cli",
+                    f"-conf={self.bitcoin_conf}",
+                    "getblockchaininfo",
+                ],
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            j = json.loads(out.decode("utf-8", errors="replace"))
+            return bool(j.get("initialblockdownload", False))
+        except Exception:
+            return False
 
     def parse_last_job(self) -> Optional[Dict[str, Any]]:
         """
@@ -111,7 +150,7 @@ class DatumMonitor:
         """
         Format mining status for /mining command.
         """
-        host = os.uname().nodename
+        host = _get_hostname()
         job = self.parse_last_job()
 
         if not job:
@@ -146,7 +185,7 @@ class DatumMonitor:
         """
         Short status string for /datum.
         """
-        host = os.uname().nodename
+        host = _get_hostname()
         rc, out, _ = _run(["/bin/systemctl", "is-active", self.service_name], timeout=3)
         active = (rc == 0 and out.strip() == "active")
 
@@ -164,7 +203,7 @@ class DatumMonitor:
         """
         Bounded diagnostic bundle for /investigate_datum.
         """
-        host = os.uname().nodename
+        host = _get_hostname()
 
         _, status_out, status_err = _run(
             ["/bin/systemctl", "status", self.service_name, "-l", "--no-pager"], timeout=6
@@ -194,9 +233,17 @@ class DatumMonitor:
         Check for template fetch errors and alert if threshold exceeded.
         Only alert if we see sustained errors (10+ in last 3 minutes) to avoid
         alerting on brief swap-related hiccups.
+
+        During IBD, template errors are expected and suppressed entirely.
         """
+        # Check if in IBD - suppress template error alerts entirely during IBD
+        in_ibd = self._check_ibd_state()
+        if in_ibd:
+            # Don't alert on template errors during IBD - they're expected
+            return
+
         now = time.time()
-        host = os.uname().nodename
+        host = _get_hostname()
         _, out, _ = _run(
             ["/bin/journalctl", "-u", self.service_name, "--since", "3 minutes ago", "--no-pager"],
             timeout=8,
@@ -216,9 +263,14 @@ class DatumMonitor:
     def watchdog_tick(self) -> None:
         """
         Watchdog: alert if service inactive, no job progress, or 0 clients.
+        During IBD, use longer cooldowns to reduce noise.
         """
         now = time.time()
-        host = os.uname().nodename
+        host = _get_hostname()
+
+        # Check IBD state for adaptive alerting
+        in_ibd = self._check_ibd_state()
+        effective_cooldown = self.cooldown_sec * self._ibd_cooldown_multiplier if in_ibd else self.cooldown_sec
 
         self.check_for_template_errors()
 
@@ -236,7 +288,7 @@ class DatumMonitor:
             active = False
 
         if not active:
-            if (now - self._last_alert_ts) >= self.cooldown_sec:
+            if (now - self._last_alert_ts) >= effective_cooldown:
                 self._last_alert_ts = now
                 txt = (
                     f"[{host}] ⚠️ DATUM not active. Run: systemctl status {self.service_name} -l; "
@@ -253,27 +305,32 @@ class DatumMonitor:
             self._last_job_info = job
             self._last_job_ts = job["timestamp"]
 
-            # Alert immediately if 0 clients (with cooldown)
+            # Alert if 0 clients (with cooldown, extended during IBD)
             if job["clients"] == 0:
-                if (now - self._last_zero_client_alert_ts) >= self.cooldown_sec:
+                if (now - self._last_zero_client_alert_ts) >= effective_cooldown:
                     self._last_zero_client_alert_ts = now
+                    ibd_note = " (IBD in progress)" if in_ibd else ""
                     txt = (
-                        f"[{host}] ⚠️ DATUM has 0 stratum clients connected. "
+                        f"[{host}] ⚠️ DATUM has 0 stratum clients connected{ibd_note}. "
                         f"Block: {job['block']}, last job: {int(now - job['timestamp'])}s ago."
                     )
                     self.logger.log(txt)
                     if self.telegram_client:
                         self.telegram_client.send_text(txt)
 
-        # Check 3: No job progress for too long
+        # Check 3: No job progress for too long (with extended threshold during IBD)
         if self._last_job_ts is not None:
             stale_sec = now - self._last_job_ts
-            if stale_sec > self.no_job_sec:
-                if (now - self._last_alert_ts) >= self.cooldown_sec:
+            # During IBD, use longer threshold for stale jobs (5x normal)
+            effective_no_job_sec = self.no_job_sec * 5 if in_ibd else self.no_job_sec
+
+            if stale_sec > effective_no_job_sec:
+                if (now - self._last_alert_ts) >= effective_cooldown:
                     self._last_alert_ts = now
                     block_info = f"Last block: {self._last_job_info['block']}" if self._last_job_info else ""
+                    ibd_note = " (IBD in progress, reduced alerting)" if in_ibd else ""
                     txt = (
-                        f"[{host}] ⚠️ DATUM no new jobs for {int(stale_sec)}s. {block_info}. "
+                        f"[{host}] ⚠️ DATUM no new jobs for {int(stale_sec)}s{ibd_note}. {block_info}. "
                         f"Check: journalctl -u {self.service_name} -n 50 --no-pager"
                     )
                     self.logger.log(txt)

@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 import subprocess
 import psutil
+import json
+import os
 
 
 def _strip_prefix(line):
@@ -94,9 +96,9 @@ def _get_system_metrics():
     except Exception:
         metrics['cpu_pct'] = None
         metrics['ram_pct'] = None
-    
+
     metrics['ssd_temp'] = _get_ssd_temp()
-    
+
     try:
         usage = psutil.disk_usage('/mnt/bitcoin')
         metrics['disk_free'] = usage.free / (1024**3)
@@ -106,8 +108,47 @@ def _get_system_metrics():
         metrics['disk_free'] = None
         metrics['disk_total'] = None
         metrics['disk_pct'] = None
-    
+
     return metrics
+
+
+def _get_bitcoind_ibd_state(bitcoin_conf=None):
+    """
+    Get bitcoind IBD (Initial Block Download) state.
+    Returns dict with: blocks, headers, ibd, verificationprogress, warnings
+    """
+    if bitcoin_conf is None:
+        bitcoin_conf = os.getenv("BITCOIN_CONF", "/mnt/bitcoin/bitcoind/bitcoin.conf")
+
+    try:
+        out = subprocess.check_output(
+            [
+                "sudo", "-u", "bitcoin",
+                "/usr/local/bin/bitcoin-cli",
+                f"-conf={bitcoin_conf}",
+                "getblockchaininfo",
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        j = json.loads(out.decode("utf-8", errors="replace"))
+        return {
+            "ok": True,
+            "blocks": int(j.get("blocks")) if j.get("blocks") is not None else None,
+            "headers": int(j.get("headers")) if j.get("headers") is not None else None,
+            "ibd": bool(j.get("initialblockdownload")) if j.get("initialblockdownload") is not None else None,
+            "verificationprogress": float(j.get("verificationprogress")) if j.get("verificationprogress") is not None else None,
+            "warnings": j.get("warnings"),
+        }
+    except Exception:
+        return {
+            "ok": False,
+            "blocks": None,
+            "headers": None,
+            "ibd": None,
+            "verificationprogress": None,
+            "warnings": None,
+        }
 
 
 def _check_active_alerts(metrics):
@@ -128,7 +169,29 @@ def build_status_text(*_args, bitaxe_checker=None, **_kwargs):
     log_file = base_dir / 'monitor.log'
     lines = ['📊 *Bitnode Status*', '']
 
-    # Heights
+    # Bitcoind IBD state
+    ibd_state = _get_bitcoind_ibd_state()
+    if ibd_state['ok'] and ibd_state['ibd'] is not None:
+        if ibd_state['ibd']:
+            # In IBD - show detailed sync progress
+            blocks = ibd_state['blocks'] or 0
+            headers = ibd_state['headers'] or 0
+            remaining = headers - blocks
+            progress = ibd_state['verificationprogress'] or 0.0
+            progress_pct = progress * 100
+
+            lines.append(f'🔄 *Bitcoind: Syncing (IBD)*')
+            lines.append(f'   Blocks: {blocks:,} / {headers:,}')
+            lines.append(f'   Remaining: {remaining:,} blocks')
+            lines.append(f'   Progress: {progress_pct:.2f}%')
+            lines.append('')
+        else:
+            # Synced - just show current height
+            blocks = ibd_state['blocks'] or 0
+            lines.append(f'✅ *Bitcoind: Synced* (height: {blocks:,})')
+            lines.append('')
+
+    # Heights (Fulcrum lag)
     any_line, num_line = _extract_last_heights_lines(log_file)
     if num_line:
         _, height_line = _strip_prefix(num_line)
@@ -136,8 +199,11 @@ def build_status_text(*_args, bitaxe_checker=None, **_kwargs):
         _, height_line = _strip_prefix(any_line)
     else:
         height_line = 'Heights: (no data yet)'
-    lines.append(f'⛓ {height_line}')
-    lines.append('')
+
+    # Only show Fulcrum lag if not in IBD
+    if not (ibd_state['ok'] and ibd_state['ibd']):
+        lines.append(f'⛓ {height_line}')
+        lines.append('')
 
     # Datum status
     datum_active = _get_datum_status()
