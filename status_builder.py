@@ -10,6 +10,9 @@ import psutil
 import json
 import os
 
+# Import the fallback-aware function from system_info
+from system_info import get_bitcoind_state
+
 
 def _strip_prefix(line):
     """Strip leading '[timestamp] ' prefix and return (timestamp, content)."""
@@ -114,41 +117,18 @@ def _get_system_metrics():
 
 def _get_bitcoind_ibd_state(bitcoin_conf=None):
     """
-    Get bitcoind IBD (Initial Block Download) state.
-    Returns dict with: blocks, headers, ibd, verificationprogress, warnings
+    Get bitcoind IBD (Initial Block Download) state with fallback.
+    Uses the fallback-aware function from system_info.py
     """
     if bitcoin_conf is None:
         bitcoin_conf = os.getenv("BITCOIN_CONF", "/mnt/bitcoin/bitcoind/bitcoin.conf")
 
-    try:
-        out = subprocess.check_output(
-            [
-                "sudo", "-u", "bitcoin",
-                "/usr/local/bin/bitcoin-cli",
-                f"-conf={bitcoin_conf}",
-                "getblockchaininfo",
-            ],
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-        )
-        j = json.loads(out.decode("utf-8", errors="replace"))
-        return {
-            "ok": True,
-            "blocks": int(j.get("blocks")) if j.get("blocks") is not None else None,
-            "headers": int(j.get("headers")) if j.get("headers") is not None else None,
-            "ibd": bool(j.get("initialblockdownload")) if j.get("initialblockdownload") is not None else None,
-            "verificationprogress": float(j.get("verificationprogress")) if j.get("verificationprogress") is not None else None,
-            "warnings": j.get("warnings"),
-        }
-    except Exception:
-        return {
-            "ok": False,
-            "blocks": None,
-            "headers": None,
-            "ibd": None,
-            "verificationprogress": None,
-            "warnings": None,
-        }
+    # Use the fallback-aware version that can parse debug.log
+    # We need a dummy logger for this call
+    class DummyLogger:
+        def log(self, msg): pass
+
+    return get_bitcoind_state(bitcoin_conf, DummyLogger())
 
 
 def _check_active_alerts(metrics):
