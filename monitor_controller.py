@@ -120,6 +120,7 @@ class MonitorController:
         self.bitaxe_min_hashrate_hs = float(os.getenv("BITAXE_MIN_HASHRATE_HS", "200"))
         self.bitaxe_no_share_sec = int(os.getenv("BITAXE_NO_SHARE_SEC", "300"))
         self.bitaxe_alert_cooldown_sec = int(os.getenv("BITAXE_ALERT_COOLDOWN_SEC", "180"))
+        self.bitaxe_consecutive_failures = int(os.getenv("BITAXE_CONSECUTIVE_FAILURES", "3"))
 
         self.bitaxe_checker = None
 
@@ -370,6 +371,7 @@ class MonitorController:
                 min_hashrate_hs=self.bitaxe_min_hashrate_hs,
                 no_share_sec=self.bitaxe_no_share_sec,
                 alert_cooldown_sec=self.bitaxe_alert_cooldown_sec,
+                consecutive_failure_threshold=self.bitaxe_consecutive_failures,
                 state_callback=self._save_state,
             )
             # Restore persisted state if available
@@ -378,7 +380,8 @@ class MonitorController:
             self.logger.log(
                 f"[BITAXE] Enabled: url={self.bitaxe_url} interval={self.bitaxe_check_interval}s "
                 f"min_hr={self.bitaxe_min_hashrate_hs}H/s no_share={self.bitaxe_no_share_sec}s "
-                f"cooldown={self.bitaxe_alert_cooldown_sec}s"
+                f"cooldown={self.bitaxe_alert_cooldown_sec}s "
+                f"consecutive_failures={self.bitaxe_consecutive_failures}"
             )
         else:
             self.logger.log("[BITAXE] Disabled (BITAXE_URL not set).")

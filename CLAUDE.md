@@ -70,6 +70,6 @@ black *.py
 - **Monitor Directory**: /home/charb/fulcrum-bot/
 - **Monitor Log**: /home/charb/fulcrum-bot/monitor.log
 - **Config File**: /home/charb/fulcrum-bot/local.env
-- **Bitaxe IP**: 192.168.68.111
+- **Bitaxe IP**: 192.168.68.102
 - **Main Branch**: main
 - **Feature Branches**: feature/*

@@ -12,7 +12,7 @@ This file contains operational support information for the bitnode_monitor deplo
 - **Location**: Home network
 
 ### Network Configuration
-- **Bitaxe Miner IP**: `192.168.68.111`
+- **Bitaxe Miner IP**: `192.168.68.102`
 - **Bitcoin RPC**: `127.0.0.1:8332` (local)
 - **Fulcrum**: Running locally on knots00
 
@@ -57,17 +57,17 @@ ssh charb@knots00 "sudo journalctl -u datum-gateway -f"
 
 #### Check Bitaxe Status
 ```bash
-ssh charb@knots00 "curl -s http://192.168.68.111/api/system/info | jq '{hashRate,temp,power,sharesAccepted,sharesRejected}'"
+ssh charb@knots00 "curl -s http://192.168.68.102/api/system/info | jq '{hashRate,temp,power,sharesAccepted,sharesRejected}'"
 ```
 
 #### Restart Bitaxe
 ```bash
-ssh charb@knots00 "curl -X POST http://192.168.68.111/api/system/restart"
+ssh charb@knots00 "curl -X POST http://192.168.68.102/api/system/restart"
 ```
 
 #### Adjust Fan Speed
 ```bash
-ssh charb@knots00 "curl -X PATCH http://192.168.68.111/api/system -H 'Content-Type: application/json' -d '{\"fanspeed\":80}'"
+ssh charb@knots00 "curl -X PATCH http://192.168.68.102/api/system -H 'Content-Type: application/json' -d '{\"fanspeed\":80}'"
 ```
 
 ## Service Management
@@ -156,10 +156,10 @@ ssh charb@knots00 "sudo systemctl restart fulcrum"
 ### Bitaxe Not Responding
 ```bash
 # Check network connectivity
-ssh charb@knots00 "ping -c 3 192.168.68.111"
+ssh charb@knots00 "ping -c 3 192.168.68.102"
 
 # Check if Bitaxe web interface is up
-ssh charb@knots00 "curl -I http://192.168.68.111"
+ssh charb@knots00 "curl -I http://192.168.68.102"
 
 # Power cycle Bitaxe if necessary (physical access required)
 ```

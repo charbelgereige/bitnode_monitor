@@ -40,6 +40,7 @@ class BitaxeChecker:
         min_hashrate_hs: float = 50.0,   # treat below as "not mining"
         no_share_sec: int = 900,         # urgent if no accepted shares change for this long
         alert_cooldown_sec: int = 300,   # avoid spamming
+        consecutive_failure_threshold: int = 3,  # require sustained AxeOS failures
         state_callback=None,              # callback to save state after updates
     ):
         self.base_url = base_url.rstrip("/")
@@ -51,11 +52,14 @@ class BitaxeChecker:
         self.min_hashrate_hs = float(min_hashrate_hs)
         self.no_share_sec = int(no_share_sec)
         self.alert_cooldown_sec = int(alert_cooldown_sec)
+        self.consecutive_failure_threshold = max(1, int(consecutive_failure_threshold))
 
         self._last_snapshot: Optional[BitaxeSnapshot] = None
         self._last_accept_change_ts: Optional[float] = None
         self._last_urgent_ts: float = 0.0
         self._last_fallback_ts: float = 0.0
+        self._consecutive_fetch_failures: int = 0
+        self._reachability_alert_active: bool = False
         self._last_pool_state: Optional[int] = None  # Track previous fallback state (0=primary, 1=fallback)
         self._fallback_state_change_ts: float = 0.0  # When did we last change pool state
         self._last_daily_summary_ts: float = 0.0  # Last time we sent daily summary
@@ -163,6 +167,28 @@ class BitaxeChecker:
         snap = self._fetch()
         alert_msg: Optional[str] = None
 
+        if snap.ok:
+            if self._consecutive_fetch_failures:
+                self.logger.log(
+                    f"[BITAXE] AxeOS reachable again after "
+                    f"{self._consecutive_fetch_failures} failed poll(s)."
+                )
+                if self._reachability_alert_active:
+                    alert_msg = f"[BITAXE] ✅ AxeOS reachable again at {self.base_url}."
+                    self._send(alert_msg)
+                    self._reachability_alert_active = False
+            self._consecutive_fetch_failures = 0
+        else:
+            self._consecutive_fetch_failures += 1
+            if self._consecutive_fetch_failures < self.consecutive_failure_threshold:
+                self.logger.log(
+                    f"[BITAXE] AxeOS poll failed "
+                    f"({self._consecutive_fetch_failures}/{self.consecutive_failure_threshold}) "
+                    f"at {self.base_url}: {snap.raw_error}"
+                )
+                self._last_snapshot = snap
+                return snap, None
+
         # Update "last accepted share change" timestamp
         if snap.ok and snap.shares_accepted is not None:
             if (
@@ -266,8 +292,13 @@ class BitaxeChecker:
                     self._last_urgent_ts = snap.ts
         else:
             if (snap.ts - self._last_urgent_ts) >= self.alert_cooldown_sec:
-                alert_msg = f"[BITAXE] 🚨 URGENT: cannot reach AxeOS at {self.base_url} ({snap.raw_error})."
+                alert_msg = (
+                    f"[BITAXE] 🚨 URGENT: cannot reach AxeOS at {self.base_url} "
+                    f"after {self._consecutive_fetch_failures} consecutive failed polls "
+                    f"({snap.raw_error})."
+                )
                 self._send(alert_msg)
+                self._reachability_alert_active = True
                 self._last_urgent_ts = snap.ts
 
         self._last_snapshot = snap
